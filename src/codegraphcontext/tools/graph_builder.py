@@ -621,352 +621,289 @@ class GraphBuilder:
             # Function calls are also handled in a separate pass after all files are processed.
 
     # Second pass to create relationships that depend on all files being present like call functions and class inheritance
-    def _safe_run_create(self, session, query, params) -> bool:
-        """Helper to run a creation query safely, catching exceptions and checking result."""
-        try:
-            result = session.run(query, **params)
-            row = result.single()
-            return row is not None and row.get('created', 0) > 0
-        except Exception as e:
-            # Optionally log, but suppress to allow fallback
-            return False
+    def _resolve_function_call(self, call: Dict, caller_file_path: str, local_names: set, local_imports: dict, imports_map: dict, skip_external: bool) -> Optional[Dict]:
+        """Resolve a single function call to its target. Returns a dict with call params or None if skipped."""
+        called_name = call['name']
+        if called_name in __builtins__: return None
 
-    def _create_function_calls(self, session, file_data: Dict, imports_map: dict):
-        """Create CALLS relationships with a unified, prioritized logic flow for all call types."""
-        caller_file_path = str(Path(file_data['path']).resolve())
-        num_calls = len(file_data.get('function_calls', []))
-        if num_calls > 0:
-            debug_log(f"Creating function calls for {caller_file_path} (Count: {num_calls})")
+        resolved_path = None
+        full_call = call.get('full_name', called_name)
+        base_obj = full_call.split('.')[0] if '.' in full_call else None
         
-        local_names = {f['name'] for f in file_data.get('functions', [])} | \
-                      {c['name'] for c in file_data.get('classes', [])}
-        local_imports = {imp.get('alias') or imp['name'].split('.')[-1]: imp['name'] 
-                        for imp in file_data.get('imports', [])}
+        is_chained_call = full_call.count('.') > 1 if '.' in full_call else False
         
-        # Check if we should skip external resolution attempts - 
-        skip_external = (get_config_value("SKIP_EXTERNAL_RESOLUTION") or "false").lower() == "true"
-        
-        for call in file_data.get('function_calls', []):
-            called_name = call['name']
-            # debug_log(f"Processing call: {called_name}")
-            if called_name in __builtins__: continue
+        if is_chained_call and base_obj in ('self', 'this', 'super', 'super()', 'cls', '@'):
+            lookup_name = called_name
+        else:
+            lookup_name = base_obj if base_obj else called_name
 
-            resolved_path = None
-            full_call = call.get('full_name', called_name)
-            base_obj = full_call.split('.')[0] if '.' in full_call else None
-            
-            # For chained calls like self.graph_builder.method(), we need to look up 'method'
-            # For direct calls like self.method(), we can use the caller's file
-            is_chained_call = full_call.count('.') > 1 if '.' in full_call else False
-            
-            # Determine the lookup name:
-            # - For chained calls (self.attr.method), use the actual method name
-            # - For direct calls (self.method or module.function), use the base object
-            if is_chained_call and base_obj in ('self', 'this', 'super', 'super()', 'cls', '@'):
-                lookup_name = called_name  # Use the actual method name for lookup
-            else:
-                lookup_name = base_obj if base_obj else called_name
-
-            # 1. Check for local context keywords/direct local names
-            # Only resolve to caller_file_path for DIRECT self/this calls, not chained ones
-            if base_obj in ('self', 'this', 'super', 'super()', 'cls', '@') and not is_chained_call:
-                resolved_path = caller_file_path
-            elif lookup_name in local_names:
-                resolved_path = caller_file_path
-            
-            # 2. Check inferred type if available
-            elif call.get('inferred_obj_type'):
-                obj_type = call['inferred_obj_type']
-                possible_paths = imports_map.get(obj_type, [])
-                if len(possible_paths) > 0:
-                    resolved_path = possible_paths[0]
-            
-            # 3. Check imports map with validation against local imports
-            if not resolved_path:
-                possible_paths = imports_map.get(lookup_name, [])
-                if len(possible_paths) == 1:
-                    resolved_path = possible_paths[0]
-                elif len(possible_paths) > 1:
-                    if lookup_name in local_imports:
-                        full_import_name = local_imports[lookup_name]
-                        
-                        # Optimization: Check if the FQN is directly in imports_map (from pre-scan)
-                        if full_import_name in imports_map:
-                             direct_paths = imports_map[full_import_name]
-                             if direct_paths and len(direct_paths) == 1:
-                                 resolved_path = direct_paths[0]
-                        
-                        if not resolved_path:
-                            for path in possible_paths:
-                                if full_import_name.replace('.', '/') in path:
-                                    resolved_path = path
-                                    break
-            
-            if not resolved_path:
-                # Only log warning if we're not skipping external resolution
-                if not skip_external:
-                    warning_logger(f"Could not resolve call {called_name} (lookup: {lookup_name}) in {caller_file_path}")
-                # Track that this was an unresolved external call
-                is_unresolved_external = True
-            else:
-                is_unresolved_external = False
-            # else:
-            #      info_logger(f"Resolved call {called_name} -> {resolved_path}")
-            
-            # Legacy fallback block (was mis-indented)
-            if not resolved_path:
-                possible_paths = imports_map.get(lookup_name, [])
-                if len(possible_paths) > 0:
-                     # Final fallback: global candidate
-                     # Check if it was imported explicitly, otherwise risky
-                     if lookup_name in local_imports:
-                         # We already tried specific matching above, but if we are here
-                         # it means we had ambiguity without matching path?
-                         pass
-                     else:
-                        # Fallback to first available if not imported? Or skip?
-                        # Original logic: resolved_path = possible_paths[0]
-                        # But wait, original code logic was:
-                        pass
-            if not resolved_path:
-                if called_name in local_names:
-                    resolved_path = caller_file_path
-                    is_unresolved_external = False  # This is a local call, not external
-                elif called_name in imports_map and imports_map[called_name]:
-                    # Check if any path in imports_map for called_name matches current file's imports
-                    candidates = imports_map[called_name]
-                    for path in candidates:
-                        for imp_name in local_imports.values():
-                            if imp_name.replace('.', '/') in path:
-                                resolved_path = path
-                                is_unresolved_external = False  # Found a match
-                                break
-                        if resolved_path: break
+        if base_obj in ('self', 'this', 'super', 'super()', 'cls', '@') and not is_chained_call:
+            resolved_path = caller_file_path
+        elif lookup_name in local_names:
+            resolved_path = caller_file_path
+        elif call.get('inferred_obj_type'):
+            obj_type = call['inferred_obj_type']
+            possible_paths = imports_map.get(obj_type, [])
+            if len(possible_paths) > 0:
+                resolved_path = possible_paths[0]
+        
+        if not resolved_path:
+            possible_paths = imports_map.get(lookup_name, [])
+            if len(possible_paths) == 1:
+                resolved_path = possible_paths[0]
+            elif len(possible_paths) > 1:
+                if lookup_name in local_imports:
+                    full_import_name = local_imports[lookup_name]
+                    if full_import_name in imports_map:
+                         direct_paths = imports_map[full_import_name]
+                         if direct_paths and len(direct_paths) == 1:
+                             resolved_path = direct_paths[0]
                     if not resolved_path:
-                        resolved_path = candidates[0]
-                else:
-                    resolved_path = caller_file_path
-            
-            # Skip creating CALLS relationship for unresolved external calls when skip_external is enabled
-            if skip_external and is_unresolved_external:
-                continue
-
-            caller_context = call.get('context')
-            if caller_context and len(caller_context) == 3 and caller_context[0] is not None:
-                caller_name, _, caller_line_number = caller_context
-                
-                # KùzuDB workaround: Try Function->Function first, then other combinations
-                # This avoids polymorphic MERGE which KùzuDB doesn't support
-                call_params = self._sanitize_props({
-                    'caller_name': caller_name,
-                    'caller_file_path': caller_file_path,
-                    'caller_line_number': caller_line_number,
-                    'called_name': called_name,
-                    'called_file_path': resolved_path,
-                    'line_number': call['line_number'],
-                    'args': call.get('args', []),
-                    'full_call_name': call.get('full_name', called_name)
-                })
-
-                # Try Function caller -> Function callee
-                if not self._safe_run_create(session, """
-                    OPTIONAL MATCH (caller:Function {name: $caller_name, path: $caller_file_path})
-                    OPTIONAL MATCH (called:Function {name: $called_name, path: $called_file_path})
-                    WITH caller, called
-                    WHERE caller IS NOT NULL AND called IS NOT NULL
-                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                    RETURN count(*) as created
-                """, call_params):
-
-                    # Try Function caller -> Class.__init__ / constructor
-                    if not self._safe_run_create(session, """
-                        OPTIONAL MATCH (caller:Function {name: $caller_name, path: $caller_file_path})
-                        OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                        OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-                        WHERE init.name IN ["__init__", "constructor"]
-                        WITH caller, init
-                        WHERE caller IS NOT NULL AND init IS NOT NULL
-                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(init)
-                        RETURN count(*) as created
-                    """, call_params):
-                        # No __init__ found - link directly to the Class node
-                        self._safe_run_create(session, """
-                            OPTIONAL MATCH (caller:Function {name: $caller_name, path: $caller_file_path})
-                            OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                            WITH caller, called
-                            WHERE caller IS NOT NULL AND called IS NOT NULL
-                            MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            RETURN count(*) as created
-                        """, call_params)
-
-                # Try Class caller -> Function callee
-                if not self._safe_run_create(session, """
-                    OPTIONAL MATCH (caller:Class {name: $caller_name, path: $caller_file_path})
-                    OPTIONAL MATCH (called:Function {name: $called_name, path: $called_file_path})
-                    WITH caller, called
-                    WHERE caller IS NOT NULL AND called IS NOT NULL
-                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                    RETURN count(*) as created
-                """, call_params):
-
-                    # Try Class caller -> Class.__init__ / constructor
-                    if not self._safe_run_create(session, """
-                        OPTIONAL MATCH (caller:Class {name: $caller_name, path: $caller_file_path})
-                        OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                        OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-                        WHERE init.name IN ["__init__", "constructor"]
-                        WITH caller, init
-                        WHERE caller IS NOT NULL AND init IS NOT NULL
-                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(init)
-                        RETURN count(*) as created
-                    """, call_params):
-                        # No __init__ - link directly to the Class node
-                        if not self._safe_run_create(session, """
-                            OPTIONAL MATCH (caller:Class {name: $caller_name, path: $caller_file_path})
-                            OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                            WITH caller, called
-                            WHERE caller IS NOT NULL AND called IS NOT NULL
-                            MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            RETURN count(*) as created
-                        """, call_params):
-                            # Fallback: Relaxed Global Search (Function caller -> any Function callee)
-                            if not self._safe_run_create(session, """
-                                OPTIONAL MATCH (caller:Function {name: $caller_name, path: $caller_file_path})
-                                OPTIONAL MATCH (called:Function {name: $called_name})
-                                WITH caller, called
-                                WHERE caller IS NOT NULL AND called IS NOT NULL
-                                MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            """, call_params):
-                                # Fallback: Class caller -> any Function callee
-                                self._safe_run_create(session, """
-                                    OPTIONAL MATCH (caller:Class {name: $caller_name, path: $caller_file_path})
-                                    OPTIONAL MATCH (called:Function {name: $called_name})
-                                    WITH caller, called
-                                    WHERE caller IS NOT NULL AND called IS NOT NULL
-                                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                                """, call_params)
+                        for path in possible_paths:
+                            if full_import_name.replace('.', '/') in path:
+                                resolved_path = path
+                                break
+        
+        if not resolved_path:
+            is_unresolved_external = True
+        else:
+            is_unresolved_external = False
+        
+        # Legacy fallback
+        if not resolved_path:
+            possible_paths = imports_map.get(lookup_name, [])
+            if len(possible_paths) > 0:
+                 if lookup_name in local_imports:
+                     pass
+                 else:
+                    pass
+        if not resolved_path:
+            if called_name in local_names:
+                resolved_path = caller_file_path
+                is_unresolved_external = False
+            elif called_name in imports_map and imports_map[called_name]:
+                candidates = imports_map[called_name]
+                for path in candidates:
+                    for imp_name in local_imports.values():
+                        if imp_name.replace('.', '/') in path:
+                            resolved_path = path
+                            is_unresolved_external = False
+                            break
+                    if resolved_path: break
+                if not resolved_path:
+                    resolved_path = candidates[0]
             else:
-                # File-level calls: Try Function first, then Class
-                call_params = self._sanitize_props({
-                    'caller_file_path': caller_file_path,
-                    'called_name': called_name,
-                    'called_file_path': resolved_path,
-                    'line_number': call['line_number'],
-                    'args': call.get('args', []),
-                    'full_call_name': call.get('full_name', called_name)
-                })
+                resolved_path = caller_file_path
+        
+        if skip_external and is_unresolved_external:
+            return None
 
-
-                if not self._safe_run_create(session, """
-                    OPTIONAL MATCH (caller:File {path: $caller_file_path})
-                    OPTIONAL MATCH (called:Function {name: $called_name, path: $called_file_path})
-                    WITH caller, called
-                    WHERE caller IS NOT NULL AND called IS NOT NULL
-                    MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                    RETURN count(*) as created
-                """, call_params):
-
-                    # Try File caller -> Class.__init__ / constructor
-                    if not self._safe_run_create(session, """
-                        OPTIONAL MATCH (caller:File {path: $caller_file_path})
-                        OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                        OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-                        WHERE init.name IN ["__init__", "constructor"]
-                        WITH caller, init
-                        WHERE caller IS NOT NULL AND init IS NOT NULL
-                        MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(init)
-                        RETURN count(*) as created
-                    """, call_params):
-                        # No __init__ - link directly to the Class node
-                        if not self._safe_run_create(session, """
-                            OPTIONAL MATCH (caller:File {path: $caller_file_path})
-                            OPTIONAL MATCH (called:Class {name: $called_name, path: $called_file_path})
-                            WITH caller, called
-                            WHERE caller IS NOT NULL AND called IS NOT NULL
-                            MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            RETURN count(*) as created
-                        """, call_params):
-                            # Fallback: Relaxed Global Search (File -> any Function)
-                            self._safe_run_create(session, """
-                                OPTIONAL MATCH (caller:File {path: $caller_file_path})
-                                OPTIONAL MATCH (called:Function {name: $called_name})
-                                WITH caller, called
-                                WHERE caller IS NOT NULL AND called IS NOT NULL
-                                MERGE (caller)-[:CALLS {line_number: $line_number, args: $args, full_call_name: $full_call_name}]->(called)
-                            """, call_params)
+        caller_context = call.get('context')
+        if caller_context and len(caller_context) == 3 and caller_context[0] is not None:
+            caller_name, _, caller_line_number = caller_context
+            return {
+                'type': 'function',
+                'caller_name': caller_name,
+                'caller_file_path': caller_file_path,
+                'caller_line_number': caller_line_number,
+                'called_name': called_name,
+                'called_file_path': resolved_path,
+                'line_number': call['line_number'],
+                'args': call.get('args', []),
+                'full_call_name': call.get('full_name', called_name),
+            }
+        else:
+            return {
+                'type': 'file',
+                'caller_file_path': caller_file_path,
+                'called_name': called_name,
+                'called_file_path': resolved_path,
+                'line_number': call['line_number'],
+                'args': call.get('args', []),
+                'full_call_name': call.get('full_name', called_name),
+            }
 
     def _create_all_function_calls(self, all_file_data: list[Dict], imports_map: dict):
-        """Create CALLS relationships for all functions after all files have been processed."""
-        debug_log(f"_create_all_function_calls called with {len(all_file_data)} files")
-        with self.driver.session() as session:
-            for idx, file_data in enumerate(all_file_data):
-                debug_log(f"Processing file {idx+1}/{len(all_file_data)}: {file_data.get('path', 'unknown')}")
-                self._create_function_calls(session, file_data, imports_map)
-
-    def _create_inheritance_links(self, session, file_data: Dict, imports_map: dict):
-        """Create INHERITS relationships with a more robust resolution logic."""
-        caller_file_path = str(Path(file_data['path']).resolve())
-        local_class_names = {c['name'] for c in file_data.get('classes', [])}
-        # Create a map of local import aliases/names to full import names
-        local_imports = {imp.get('alias') or imp['name'].split('.')[-1]: imp['name']
-                         for imp in file_data.get('imports', [])}
-
-        for class_item in file_data.get('classes', []):
-            if not class_item.get('bases'):
-                continue
-
-            for base_class_str in class_item['bases']:
-                if base_class_str == 'object':
+        """Create CALLS relationships using fully label-specific UNWIND queries (V3).
+        Both caller AND called sides use specific labels — no OR scans anywhere."""
+        skip_external = (get_config_value("SKIP_EXTERNAL_RESOLUTION") or "false").lower() == "true"
+        
+        # Build global lookup: which names are classes in which files
+        file_class_lookup = {}
+        for fd in all_file_data:
+            fp = str(Path(fd['path']).resolve())
+            file_class_lookup[fp] = {c['name'] for c in fd.get('classes', [])}
+        
+        # Phase 1: Resolve all calls, categorized by (caller_label, called_label)
+        info_logger(f"[CALLS] Resolving function calls across {len(all_file_data)} files...")
+        fn_to_fn = []     # Function -> Function (most common, no init lookup)
+        fn_to_cls = []    # Function -> Class (needs init lookup)
+        cls_to_fn = []    # Class -> Function
+        cls_to_cls = []   # Class -> Class (needs init lookup)
+        file_to_fn = []   # File -> Function
+        file_to_cls = []  # File -> Class (needs init lookup)
+        
+        for idx, file_data in enumerate(all_file_data):
+            caller_file_path = str(Path(file_data['path']).resolve())
+            func_names = {f['name'] for f in file_data.get('functions', [])}
+            class_names = {c['name'] for c in file_data.get('classes', [])}
+            local_names = func_names | class_names
+            local_imports = {imp.get('alias') or imp['name'].split('.')[-1]: imp['name'] 
+                            for imp in file_data.get('imports', [])}
+            
+            for call in file_data.get('function_calls', []):
+                resolved = self._resolve_function_call(
+                    call, caller_file_path, local_names, local_imports, imports_map, skip_external
+                )
+                if not resolved:
                     continue
-
-                resolved_path = None
-                target_class_name = base_class_str.split('.')[-1]
-
-                # Handle qualified names like module.Class or alias.Class
-                if '.' in base_class_str:
-                    lookup_name = base_class_str.split('.')[0]
-                    
-                    # Case 1: The prefix is a known import
-                    if lookup_name in local_imports:
-                        full_import_name = local_imports[lookup_name]
-                        possible_paths = imports_map.get(target_class_name, [])
-                        # Find the path that corresponds to the imported module
-                        for path in possible_paths:
-                            if full_import_name.replace('.', '/') in path:
-                                resolved_path = path
-                                break
-                # Handle simple names
-                else:
-                    lookup_name = base_class_str
-                    # Case 2: The base class is in the same file
-                    if lookup_name in local_class_names:
-                        resolved_path = caller_file_path
-                    # Case 3: The base class was imported directly (e.g., from module import Parent)
-                    elif lookup_name in local_imports:
-                        full_import_name = local_imports[lookup_name]
-                        possible_paths = imports_map.get(target_class_name, [])
-                        for path in possible_paths:
-                            if full_import_name.replace('.', '/') in path:
-                                resolved_path = path
-                                break
-                    # Case 4: Fallback to global map (less reliable)
-                    elif lookup_name in imports_map:
-                        possible_paths = imports_map[lookup_name]
-                        if len(possible_paths) == 1:
-                            resolved_path = possible_paths[0]
                 
-                # If a path was found, create the relationship
-                if resolved_path:
-                    session.run("""
-                        MATCH (child:Class {name: $child_name, path: $path})
-                        MATCH (parent:Class {name: $parent_name, path: $resolved_parent_file_path})
-                        MERGE (child)-[:INHERITS]->(parent)
-                    """,
-                    child_name=class_item['name'],
-                    path=caller_file_path,
-                    parent_name=target_class_name,
-                    resolved_parent_file_path=resolved_path)
+                called_path = resolved.get('called_file_path', '')
+                called_name = resolved['called_name']
+                called_is_class = called_name in file_class_lookup.get(called_path, set())
+                
+                if resolved['type'] == 'file':
+                    if called_is_class:
+                        file_to_cls.append(resolved)
+                    else:
+                        file_to_fn.append(resolved)
+                else:
+                    caller_name = resolved['caller_name']
+                    caller_is_class = caller_name in class_names
+                    if caller_is_class:
+                        (cls_to_cls if called_is_class else cls_to_fn).append(resolved)
+                    else:
+                        (fn_to_cls if called_is_class else fn_to_fn).append(resolved)
+            
+            if (idx + 1) % 1000 == 0:
+                total = len(fn_to_fn) + len(fn_to_cls) + len(cls_to_fn) + len(cls_to_cls)
+                file_total = len(file_to_fn) + len(file_to_cls)
+                info_logger(f"[CALLS] Resolved {idx + 1}/{len(all_file_data)} files... "
+                           f"({total} fn/cls calls, {file_total} file calls)")
+        
+        total_all = len(fn_to_fn) + len(fn_to_cls) + len(cls_to_fn) + len(cls_to_cls) + len(file_to_fn) + len(file_to_cls)
+        info_logger(f"[CALLS] Resolution complete: fn→fn={len(fn_to_fn)}, fn→cls={len(fn_to_cls)}, "
+                    f"cls→fn={len(cls_to_fn)}, cls→cls={len(cls_to_cls)}, "
+                    f"file→fn={len(file_to_fn)}, file→cls={len(file_to_cls)}. Total={total_all}")
+        
+        # Phase 2: Batch write — fully label-specific queries (no OR scans)
+        BATCH_SIZE = 1000
+        
+        Q_FN_TO_FN = """
+            UNWIND $batch AS row
+            MATCH (caller:Function {name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number})
+            MATCH (called:Function {name: row.called_name, path: row.called_file_path})
+            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(called)
+        """
+        Q_FN_TO_CLS = """
+            UNWIND $batch AS row
+            MATCH (caller:Function {name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number})
+            MATCH (called:Class {name: row.called_name, path: row.called_file_path})
+            OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
+            WHERE init.name IN ["__init__", "constructor"]
+            WITH caller, COALESCE(init, called) as final_target, row
+            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(final_target)
+        """
+        Q_CLS_TO_FN = """
+            UNWIND $batch AS row
+            MATCH (caller:Class {name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number})
+            MATCH (called:Function {name: row.called_name, path: row.called_file_path})
+            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(called)
+        """
+        Q_CLS_TO_CLS = """
+            UNWIND $batch AS row
+            MATCH (caller:Class {name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number})
+            MATCH (called:Class {name: row.called_name, path: row.called_file_path})
+            OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
+            WHERE init.name IN ["__init__", "constructor"]
+            WITH caller, COALESCE(init, called) as final_target, row
+            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(final_target)
+        """
+        Q_FILE_TO_FN = """
+            UNWIND $batch AS row
+            MATCH (caller:File {path: row.caller_file_path})
+            MATCH (called:Function {name: row.called_name, path: row.called_file_path})
+            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(called)
+        """
+        Q_FILE_TO_CLS = """
+            UNWIND $batch AS row
+            MATCH (caller:File {path: row.caller_file_path})
+            MATCH (called:Class {name: row.called_name, path: row.called_file_path})
+            OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
+            WHERE init.name IN ["__init__", "constructor"]
+            WITH caller, COALESCE(init, called) as final_target, row
+            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(final_target)
+        """
+        
+        groups = [
+            ("fn→fn", fn_to_fn, Q_FN_TO_FN),
+            ("fn→cls", fn_to_cls, Q_FN_TO_CLS),
+            ("cls→fn", cls_to_fn, Q_CLS_TO_FN),
+            ("cls→cls", cls_to_cls, Q_CLS_TO_CLS),
+            ("file→fn", file_to_fn, Q_FILE_TO_FN),
+            ("file→cls", file_to_cls, Q_FILE_TO_CLS),
+        ]
+        
+        import time as _time
+        with self.driver.session() as session:
+            for label, calls, query in groups:
+                if not calls:
+                    info_logger(f"[CALLS] {label}: 0 (skipped)")
+                    continue
+                t0 = _time.time()
+                for i in range(0, len(calls), BATCH_SIZE):
+                    batch = calls[i:i + BATCH_SIZE]
+                    session.run(query, batch=batch)
+                    written = min(i + BATCH_SIZE, len(calls))
+                    if written % 5000 < BATCH_SIZE or written == len(calls):
+                        elapsed = _time.time() - t0
+                        info_logger(f"[CALLS] {label}: {written}/{len(calls)} ({elapsed:.1f}s)")
+                elapsed = _time.time() - t0
+                info_logger(f"[CALLS] {label} done: {len(calls)} in {elapsed:.1f}s")
+        
+        info_logger(f"[CALLS] All complete: {total_all} CALLS relationships processed.")
 
+    def _resolve_inheritance_link(self, class_item: Dict, base_class_str: str, caller_file_path: str, local_class_names: set, local_imports: dict, imports_map: dict) -> Optional[Dict]:
+        """Resolve a single inheritance link. Returns a dict with params or None."""
+        if base_class_str == 'object':
+            return None
+
+        resolved_path = None
+        target_class_name = base_class_str.split('.')[-1]
+
+        if '.' in base_class_str:
+            lookup_name = base_class_str.split('.')[0]
+            if lookup_name in local_imports:
+                full_import_name = local_imports[lookup_name]
+                possible_paths = imports_map.get(target_class_name, [])
+                for path in possible_paths:
+                    if full_import_name.replace('.', '/') in path:
+                        resolved_path = path
+                        break
+        else:
+            lookup_name = base_class_str
+            if lookup_name in local_class_names:
+                resolved_path = caller_file_path
+            elif lookup_name in local_imports:
+                full_import_name = local_imports[lookup_name]
+                possible_paths = imports_map.get(target_class_name, [])
+                for path in possible_paths:
+                    if full_import_name.replace('.', '/') in path:
+                        resolved_path = path
+                        break
+            elif lookup_name in imports_map:
+                possible_paths = imports_map[lookup_name]
+                if len(possible_paths) == 1:
+                    resolved_path = possible_paths[0]
+
+        if resolved_path:
+            return {
+                'child_name': class_item['name'],
+                'path': caller_file_path,
+                'parent_name': target_class_name,
+                'resolved_parent_file_path': resolved_path,
+            }
+        return None
 
     def _create_csharp_inheritance_and_interfaces(self, session, file_data: Dict, imports_map: dict):
         """Create INHERITS and IMPLEMENTS relationships for C# types."""
@@ -987,31 +924,24 @@ class GraphBuilder:
                     continue
                 
                 for base_str in type_item['bases']:
-                    # Clean up the base name (remove generic parameters, etc.)
                     base_name = base_str.split('<')[0].strip()
                     
-                    # Determine if this is an interface
                     is_interface = False
                     resolved_path = caller_file_path
                     
-                    # Check if base is a local interface
                     for iface in file_data.get('interfaces', []):
                         if iface['name'] == base_name:
                             is_interface = True
                             break
                     
-                    # Check if base is in imports_map
                     if base_name in imports_map:
                         possible_paths = imports_map[base_name]
                         if len(possible_paths) > 0:
                             resolved_path = possible_paths[0]
                     
-                    # For C#, first base is usually the class (if any), rest are interfaces
                     base_index = type_item['bases'].index(base_str)
                     
-                    # Try to determine if it's an interface
                     if is_interface or (base_index > 0 and type_label == 'Class'):
-                        # This is an IMPLEMENTS relationship
                         session.run("""
                             MATCH (child {name: $child_name, path: $path})
                             WHERE child:Class OR child:Struct OR child:Record
@@ -1022,7 +952,6 @@ class GraphBuilder:
                         path=caller_file_path,
                         interface_name=base_name)
                     else:
-                        # This is an INHERITS relationship
                         session.run("""
                             MATCH (child {name: $child_name, path: $path})
                             WHERE child:Class OR child:Record OR child:Interface
@@ -1035,14 +964,53 @@ class GraphBuilder:
                         parent_name=base_name)
 
     def _create_all_inheritance_links(self, all_file_data: list[Dict], imports_map: dict):
-        """Create INHERITS relationships for all classes after all files have been processed."""
+        """Create INHERITS relationships for all classes using batched UNWIND queries."""
+        info_logger(f"[INHERITS] Resolving inheritance links across {len(all_file_data)} files...")
+        
+        inheritance_batch = []
+        csharp_files = []
+        
+        for file_data in all_file_data:
+            if file_data.get('lang') == 'c_sharp':
+                csharp_files.append(file_data)
+                continue
+            
+            caller_file_path = str(Path(file_data['path']).resolve())
+            local_class_names = {c['name'] for c in file_data.get('classes', [])}
+            local_imports = {imp.get('alias') or imp['name'].split('.')[-1]: imp['name']
+                             for imp in file_data.get('imports', [])}
+            
+            for class_item in file_data.get('classes', []):
+                if not class_item.get('bases'):
+                    continue
+                for base_class_str in class_item['bases']:
+                    resolved = self._resolve_inheritance_link(
+                        class_item, base_class_str, caller_file_path,
+                        local_class_names, local_imports, imports_map
+                    )
+                    if resolved:
+                        inheritance_batch.append(resolved)
+        
+        info_logger(f"[INHERITS] Resolved {len(inheritance_batch)} inheritance links, "
+                    f"{len(csharp_files)} C# files. Writing to Neo4j...")
+        
+        BATCH_SIZE = 500
         with self.driver.session() as session:
-            for file_data in all_file_data:
-                # Handle C# separately
-                if file_data.get('lang') == 'c_sharp':
-                    self._create_csharp_inheritance_and_interfaces(session, file_data, imports_map)
-                else:
-                    self._create_inheritance_links(session, file_data, imports_map)
+            # Batch non-C# inheritance
+            for i in range(0, len(inheritance_batch), BATCH_SIZE):
+                batch = inheritance_batch[i:i + BATCH_SIZE]
+                session.run("""
+                    UNWIND $batch AS row
+                    MATCH (child:Class {name: row.child_name, path: row.path})
+                    MATCH (parent:Class {name: row.parent_name, path: row.resolved_parent_file_path})
+                    MERGE (child)-[:INHERITS]->(parent)
+                """, batch=batch)
+            
+            # C# still uses individual queries (different logic per type)
+            for file_data in csharp_files:
+                self._create_csharp_inheritance_and_interfaces(session, file_data, imports_map)
+        
+        info_logger(f"[INHERITS] Complete: {len(inheritance_batch)} inheritance links processed.")
                 
     def delete_file_from_graph(self, path: str):
         """Deletes a file and all its contained elements and relationships."""
@@ -1503,8 +1471,18 @@ class GraphBuilder:
                         self.job_manager.update_job(job_id, processed_files=processed_count)
                     await asyncio.sleep(0.01)
 
+            info_logger(f"File processing complete. {len(all_file_data)} files parsed. "
+                       f"Starting post-processing phase (inheritance + function calls)...")
+            
+            import time as _time
+            t0 = _time.time()
             self._create_all_inheritance_links(all_file_data, imports_map)
+            t1 = _time.time()
+            info_logger(f"Inheritance links created in {t1 - t0:.1f}s. Starting function calls...")
+            
             self._create_all_function_calls(all_file_data, imports_map)
+            t2 = _time.time()
+            info_logger(f"Function calls created in {t2 - t1:.1f}s. Total post-processing: {t2 - t0:.1f}s")
             
             if job_id:
                 self.job_manager.update_job(job_id, status=JobStatus.COMPLETED, end_time=datetime.now())
