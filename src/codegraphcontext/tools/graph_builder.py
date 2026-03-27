@@ -1030,9 +1030,21 @@ class GraphBuilder:
                 warning_logger(f"Attempted to delete non-existent repository: {repo_path_str}")
                 return False
 
+            # Phase 1: delete via CONTAINS chain (fast, handles well-formed graph)
             session.run("""MATCH (r:Repository {path: $path})
                           OPTIONAL MATCH (r)-[:CONTAINS*]->(e)
                           DETACH DELETE r, e""", path=repo_path_str)
+            # Phase 2: delete orphaned nodes by path prefix (handles nodes that
+            # lost their CONTAINS chain due to a previous crash or partial index).
+            # Runs in batches to stay under Neo4j's transaction memory limit.
+            while True:
+                result = session.run(
+                    "MATCH (n) WHERE n.path STARTS WITH $prefix "
+                    "WITH n LIMIT 5000 DETACH DELETE n RETURN count(n) AS deleted",
+                    prefix=repo_path_str + "/"
+                ).single()
+                if not result or result["deleted"] == 0:
+                    break
             info_logger(f"Deleted repository and its contents from graph: {repo_path_str}")
             return True
 
