@@ -37,7 +37,7 @@ async def get_graph(repo_path: Optional[str] = None, cypher_query: Optional[str]
         raise HTTPException(status_code=500, detail="Database not initialized")
     
     def get_eid(element):
-        if not element: return None
+        if element is None: return None
         if isinstance(element, (int, str)):
             return str(element)
         # Try various ways to get ID (Neo4j, FalkorDB, etc.)
@@ -73,7 +73,7 @@ async def get_graph(repo_path: Optional[str] = None, cypher_query: Optional[str]
                 result = session.run(query, repo_path=repo_path)
             else:
                 print("DEBUG: Fetching global graph", flush=True)
-                query = "MATCH (n) OPTIONAL MATCH (n)-[rel]->(m) RETURN n, rel, m LIMIT 5000"
+                query = "MATCH (n) OPTIONAL MATCH (n)-[rel]->(m) RETURN n, rel, m LIMIT 50000"
                 result = session.run(query)
 
             record_count = 0
