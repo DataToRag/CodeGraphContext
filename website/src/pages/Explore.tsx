@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import CodeGraphViewer from "../components/CodeGraphViewer";
+import CodeGraphViewer3D from "../components/CodeGraphViewer3D";
 import LocalUploader from "../components/LocalUploader";
 import { motion, AnimatePresence } from "framer-motion";
 import { Loader2 } from "lucide-react";
@@ -11,6 +12,7 @@ const Explore = () => {
   const [graphData, setGraphData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"2d" | "3d">("2d");
 
   // Connection parameters for "Playground" mode (CLI/Database)
   const backend = searchParams.get("backend") || "";
@@ -92,11 +94,19 @@ const Explore = () => {
               <LocalUploader onComplete={setGraphData} />
             </div>
           </motion.div>
-        ) : (
+        ) : viewMode === "2d" ? (
           <CodeGraphViewer 
             key="viewer" 
             data={graphData} 
             onClose={() => setGraphData(null)} 
+            onToggleMode={() => setViewMode("3d")}
+          />
+        ) : (
+          <CodeGraphViewer3D 
+            key="viewer3d" 
+            data={graphData} 
+            onClose={() => setGraphData(null)} 
+            onToggleMode={() => setViewMode("2d")}
           />
         )}
       </AnimatePresence>

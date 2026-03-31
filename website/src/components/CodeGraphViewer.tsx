@@ -5,7 +5,7 @@ import {
   ArrowLeft, ZoomIn, ZoomOut, Maximize, FileCode, Search,
   Eye, EyeOff, Settings2, Palette, Github, Star,
   ChevronRight, ChevronDown, Folder, FolderOpen,
-  PanelLeftClose, PanelLeftOpen, GripVertical
+  PanelLeftClose, PanelLeftOpen, GripVertical, Box
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -190,7 +190,7 @@ function getGraphAwareNodeScale(totalNodes: number): number {
   return clamp(1 + Math.log10(safeNodeCount) * 0.22, 1, 2);
 }
 
-export default function CodeGraphViewer({ data, onClose }: { data: any, onClose: () => void }) {
+export default function CodeGraphViewer({ data, onClose, onToggleMode }: { data: any, onClose: () => void, onToggleMode?: () => void }) {
   const fgRef = useRef<any>();
   const [dimensions, setDimensions] = useState({ width: window.innerWidth, height: window.innerHeight });
   const [hoverNode, setHoverNode] = useState<any>(null);
@@ -409,6 +409,9 @@ export default function CodeGraphViewer({ data, onClose }: { data: any, onClose:
                     Project Tree
                   </h2>
                   <div className="flex items-center gap-1">
+                    <button onClick={onToggleMode} className="p-1.5 rounded-lg text-blue-400 hover:text-blue-300 hover:bg-white/5 bg-blue-500/10 transition-colors" title="Switch to 3D Mode">
+                      <Box className="w-4 h-4" />
+                    </button>
                     <button
                       onClick={() => setShowConfig(!showConfig)}
                       title="Graph Settings"
