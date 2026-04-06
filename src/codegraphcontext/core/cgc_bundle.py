@@ -709,9 +709,14 @@ cgc import <bundle-file>.cgc
                 for line in f:
                     node_data = json.loads(line)
                     
-                    # Extract labels and old ID
-                    labels = node_data.pop('_labels', [])
+                    # Extract labels and old ID (handle both Neo4j and KuzuDB formats)
+                    labels = node_data.pop('_labels', None) or node_data.pop('_label', None) or []
+                    if isinstance(labels, str):
+                        labels = [labels]
                     old_id = node_data.pop('_id', None)
+                    # Convert dict IDs to hashable tuples for mapping
+                    if isinstance(old_id, dict):
+                        old_id = (old_id.get('table', 0), old_id.get('offset', 0))
                     
                     # Remove internal properties
                     node_data.pop('_element_id', None)
@@ -731,22 +736,62 @@ cgc import <bundle-file>.cgc
         
         return count
     
+    _PK_MAP = {
+        'Repository': 'path', 'File': 'path', 'Directory': 'path',
+        'Module': 'name',
+        'Function': 'uid', 'Class': 'uid', 'Variable': 'uid',
+        'Trait': 'uid', 'Interface': 'uid', 'Macro': 'uid',
+        'Struct': 'uid', 'Enum': 'uid', 'Union': 'uid',
+        'Annotation': 'uid', 'Record': 'uid', 'Property': 'uid',
+        'Parameter': 'uid',
+    }
+    _UID_PARTS = {
+        'Function': ['name', 'path', 'line_number'],
+        'Class': ['name', 'path', 'line_number'],
+        'Variable': ['name', 'path', 'line_number'],
+        'Trait': ['name', 'path', 'line_number'],
+        'Interface': ['name', 'path', 'line_number'],
+        'Macro': ['name', 'path', 'line_number'],
+        'Struct': ['name', 'path', 'line_number'],
+        'Enum': ['name', 'path', 'line_number'],
+        'Union': ['name', 'path', 'line_number'],
+        'Annotation': ['name', 'path', 'line_number'],
+        'Record': ['name', 'path', 'line_number'],
+        'Property': ['name', 'path', 'line_number'],
+        'Parameter': ['name', 'path', 'function_line_number'],
+    }
+
     def _import_node_batch(self, session, batch: List[Tuple], id_mapping: Dict) -> int:
         """Import a batch of nodes."""
-        # Detect database backend to use appropriate ID function
         id_function = self._get_id_function()
         
         for labels, properties, old_id in batch:
             if not labels:
                 continue
             
-            # Create node with labels
+            if isinstance(labels, str):
+                labels = [labels]
             label_str = ':'.join(labels)
-            query = f"CREATE (n:{label_str}) SET n = $props RETURN {id_function}(n) as new_id"
-            
-            result = session.run(query, props=properties)
+            primary_label = labels[0]
+
+            pk_field = self._PK_MAP.get(primary_label)
+            if pk_field == 'uid' and 'uid' not in properties:
+                parts = self._UID_PARTS.get(primary_label, [])
+                properties['uid'] = ''.join(str(properties.get(p, '')) for p in parts)
+
+            if pk_field and pk_field in properties:
+                pk_val = properties[pk_field]
+                remaining = {k: v for k, v in properties.items() if k != pk_field}
+                query = (
+                    f"MERGE (n:{label_str} {{{pk_field}: $pk_val}}) "
+                    f"SET n += $props RETURN {id_function}(n) as new_id"
+                )
+                result = session.run(query, pk_val=pk_val, props=remaining)
+            else:
+                query = f"CREATE (n:{label_str}) SET n = $props RETURN {id_function}(n) as new_id"
+                result = session.run(query, props=properties)
+
             record = result.single()
-            
             if record and old_id:
                 id_mapping[old_id] = record['new_id']
         
@@ -783,6 +828,11 @@ cgc import <bundle-file>.cgc
         for edge in batch:
             old_from = edge.get('from')
             old_to = edge.get('to')
+            # Convert dict IDs to hashable tuples (matches node import conversion)
+            if isinstance(old_from, dict):
+                old_from = (old_from.get('table', 0), old_from.get('offset', 0))
+            if isinstance(old_to, dict):
+                old_to = (old_to.get('table', 0), old_to.get('offset', 0))
             rel_type = edge.get('type')
             properties = edge.get('properties', {})
             

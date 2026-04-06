@@ -523,7 +523,7 @@ def clean_helper(context: Optional[str] = None):
             while True:
                 result = session.run("""
                     MATCH (n)
-                    WHERE NOT (n:Repository)
+                    WHERE NOT n:Repository
                       AND NOT ()-[:CONTAINS]->(n)
                     WITH n LIMIT $batch_size
                     DETACH DELETE n

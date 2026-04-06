@@ -229,7 +229,22 @@ class KuzuSessionWrapper:
         # KùzuDB uses auto-commit, no explicit commit needed
         return False  # Don't suppress exceptions
 
+    @staticmethod
+    def _sanitize_value(v):
+        """Recursively coerce Python types that KuzuDB cannot bind (tuples, sets, etc.)."""
+        if isinstance(v, tuple):
+            return [KuzuSessionWrapper._sanitize_value(i) for i in v]
+        if isinstance(v, set):
+            return [KuzuSessionWrapper._sanitize_value(i) for i in v]
+        if isinstance(v, list):
+            return [KuzuSessionWrapper._sanitize_value(i) for i in v]
+        if isinstance(v, dict):
+            return {k: KuzuSessionWrapper._sanitize_value(val) for k, val in v.items()}
+        return v
+
     def run(self, query, **parameters):
+        # 0. Sanitize parameters (convert tuples/sets → lists throughout)
+        parameters = {k: self._sanitize_value(v) for k, v in parameters.items()}
         # 1. Translate Query
         debug_log(f"Original Query: {query[:200]}")
         translated_query, translated_params = self._translate_query(query, parameters)
@@ -270,9 +285,9 @@ class KuzuSessionWrapper:
             'Parameter': {'uid', 'name', 'path', 'function_line_number'}
         }
 
-        # 1. Translate n += $props
-        if "SET" in query and "+=" in query:
-            match = re.search(r'SET\s+(\w+)\s*\+=\s*\$(\w+)', query)
+        # 1. Translate SET n += $props  and  SET n = $props  (map merge/assign)
+        if "SET" in query and "= $" in query:
+            match = re.search(r'SET\s+(\w+)\s*\+?=\s*\$(\w+)', query)
             if match:
                 node_var = match.group(1)
                 param_name = match.group(2)
@@ -306,15 +321,140 @@ class KuzuSessionWrapper:
                     else:
                         query = query.replace(match.group(0), "")
 
-        # 2. Handle UID injection for MERGE
+        # 1.5: Handle UNWIND-specific patterns before standard UID injection.
+        # When queries use UNWIND $batch AS row, two things need translation:
+        #   a) SET n += row  (map merge unsupported in KuzuDB) → explicit property SETs
+        #   b) MERGE uid injection from row fields (row.name, row.line_number, …)
+        unwind_m = re.search(r'UNWIND\s+\$(\w+)\s+AS\s+(\w+)', query)
+        if unwind_m:
+            batch_param = unwind_m.group(1)
+            row_var = unwind_m.group(2)
+            batch_data = parameters.get(batch_param)
+
+            if isinstance(batch_data, list) and batch_data:
+                # 1.5a: Expand  SET node_var += row_var  →  SET node_var.p1 = row_var.p1, …
+                set_plus_re = re.compile(
+                    rf'SET\s+(\w+)\s*\+=\s*{re.escape(row_var)}\b'
+                )
+                set_m = set_plus_re.search(query)
+                if set_m:
+                    node_var = set_m.group(1)
+                    label_m = re.search(rf'\({re.escape(node_var)}:(\w+)', query)
+                    label = label_m.group(1).strip('`') if label_m else None
+                    allowed = SCHEMA_MAP.get(label, set()) if label else None
+
+                    sample = batch_data[0]
+                    parts = []
+                    for k in sample:
+                        if k == 'uid':
+                            continue
+                        if allowed and k not in allowed:
+                            continue
+                        parts.append(f"{node_var}.{k} = {row_var}.{k}")
+
+                    replacement = ("SET " + ", ".join(parts)) if parts else ""
+                    query = set_plus_re.sub(replacement, query, count=1)
+
+                # 1.5b: Inject uid into MERGE clauses that reference UNWIND row fields
+                merge_re = re.compile(
+                    r'MERGE\s+\((\w+):([^\s\{]+)\s*\{([^}]+)\}\)'
+                )
+                for m in list(merge_re.finditer(query)):
+                    var_name, label_raw, props_str = m.groups()
+                    label = label_raw.strip('`')
+                    if label not in self.uid_map:
+                        continue
+
+                    pk_parts = self.uid_map[label]
+                    all_ok = True
+
+                    for item in batch_data:
+                        uid_components = []
+                        for part in pk_parts:
+                            row_ref = re.search(
+                                rf'\b{part}\s*:\s*{re.escape(row_var)}\.(\w+)',
+                                props_str,
+                            )
+                            param_ref = re.search(
+                                rf'\b{part}\s*:\s*\$(\w+)', props_str
+                            )
+                            if row_ref:
+                                val = item.get(row_ref.group(1))
+                                if val is not None:
+                                    uid_components.append(str(val))
+                                else:
+                                    all_ok = False
+                                    break
+                            elif param_ref:
+                                val = parameters.get(param_ref.group(1))
+                                if val is not None:
+                                    uid_components.append(str(val))
+                                else:
+                                    all_ok = False
+                                    break
+                            else:
+                                all_ok = False
+                                break
+
+                        if all_ok:
+                            item['uid'] = ''.join(uid_components)
+                        else:
+                            all_ok = False
+                            break
+
+                    if all_ok:
+                        old_block = '{' + props_str + '}'
+                        new_block = (
+                            '{' + props_str + f', uid: {row_var}.uid' + '}'
+                        )
+                        query = query.replace(old_block, new_block, 1)
+
+                # 1.5c: Strip explicit SET clauses for properties not in the schema
+                # (e.g. SET m.alias = row.alias when Module has no 'alias' column)
+                def _filter_set_clause(m_set):
+                    full = m_set.group(0)
+                    assignments = re.split(r',\s*(?=\w+\.\w+\s*=)', full[4:])  # skip "SET "
+                    kept = []
+                    for a in assignments:
+                        a = a.strip()
+                        prop_m = re.match(r'(\w+)\.(\w+)\s*=', a)
+                        if prop_m:
+                            nvar = prop_m.group(1)
+                            prop_name = prop_m.group(2)
+                            lbl_m = re.search(rf'\({re.escape(nvar)}:(\w+)', query)
+                            if lbl_m:
+                                lbl = lbl_m.group(1).strip('`')
+                                allowed_s = SCHEMA_MAP.get(lbl)
+                                if allowed_s and prop_name not in allowed_s:
+                                    continue
+                        kept.append(a)
+                    if kept:
+                        return "SET " + ", ".join(kept)
+                    return ""
+
+                # Only apply to explicit SET lines (not SET +=, already handled)
+                if '+=' not in query:
+                    query = re.sub(
+                        r'SET\s+\w+\.\w+\s*=\s*[^,\n]+(?:\s*,\s*\w+\.\w+\s*=\s*[^,\n]+)*',
+                        _filter_set_clause,
+                        query,
+                    )
+
+                # 1.5d: Translate ON CREATE SET / ON MATCH SET → plain SET (KuzuDB compat)
+                query = re.sub(r'\bON\s+CREATE\s+SET\b', 'SET', query, flags=re.IGNORECASE)
+                query = re.sub(r'\bON\s+MATCH\s+SET\b', 'SET', query, flags=re.IGNORECASE)
+
+        # 2. Handle UID injection for MERGE (non-UNWIND queries)
         # We look for MERGE (v:Label {props})
         merge_pattern = r'MERGE\s+\((\w+):([^\s\{]+)\s*\{([^}]+)\}\)'
         matches = list(re.finditer(merge_pattern, query))
-        # if matches: print(f"DEBUG: Found {len(matches)} MERGE matches")
         for m in matches:
             var_name, label_raw, props_str = m.groups()
             label = label_raw.strip('`').strip(':')
             if label in self.uid_map:
+                # Skip if uid already injected (by UNWIND handler above)
+                if 'uid:' in props_str:
+                    continue
                 pk_parts = self.uid_map[label]
                 can_build_uid = True
                 uid_val = ""
@@ -329,18 +469,14 @@ class KuzuSessionWrapper:
                 
                 if can_build_uid:
                     uid_param = f"__uid_{var_name}"
-                    # Use a more specific replacement to avoid breaking other parts
                     old_block = f"{{{props_str}}}"
-                    # Preserve original properties, append uid
                     new_block = f"{{{props_str}, uid: ${uid_param}}}"
                     if old_block in query:
                          query = query.replace(old_block, new_block)
-                         # print(f"DEBUG: Replaced MERGE block: {old_block} -> {new_block}")
                     else:
                          warning_logger(f"Kuzu UID injection: could not find props block in query for label '{label}'")
                     
                     parameters[uid_param] = uid_val
-                    # print(f"DEBUG: Injected UID for {label}: {uid_val}")
 
         # 3. Escape keywords as labels
         labels_to_escape = ['Macro', 'Union', 'Property', 'CONTAINS', 'CALLS'] # Only critical keywords
@@ -372,8 +508,21 @@ class KuzuSessionWrapper:
             
         query = re.sub(r'(WHERE\s+|AND\s+|OR\s+|WHEN\s+)(\w+):([a-zA-Z0-9_]+)', single_label_replacer, query, flags=re.IGNORECASE)
 
+        # Handle NOT n:Label → NOT label(n) = 'Label'
+        def not_label_replacer(match):
+            prefix = match.group(1)
+            var_name = match.group(2)
+            label_name = match.group(3)
+            return f"{prefix}NOT label({var_name}) = '{label_name}'"
+        query = re.sub(r'(WHERE\s+|AND\s+|OR\s+)NOT\s+(\w+):([a-zA-Z0-9_]+)', not_label_replacer, query, flags=re.IGNORECASE)
+
         query = query.replace("coalesce(", "COALESCE(")
         query = re.sub(r'\btype\(', 'label(', query)
+
+        # General ON CREATE/MATCH SET → SET (also covers non-UNWIND queries)
+        query = re.sub(r'\bON\s+CREATE\s+SET\b', 'SET', query, flags=re.IGNORECASE)
+        query = re.sub(r'\bON\s+MATCH\s+SET\b', 'SET', query, flags=re.IGNORECASE)
+
         if any(x in query.upper() for x in ["CREATE CONSTRAINT", "CREATE INDEX"]):
             return "RETURN 1", {}
 

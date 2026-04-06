@@ -471,7 +471,7 @@ class GraphBuilder:
                     row = dict(item)  # shallow copy so we can set defaults safely
                     if label == 'Function' and 'cyclomatic_complexity' not in row:
                         row['cyclomatic_complexity'] = 1
-                    batch.append(row)
+                    batch.append(self._sanitize_props(row))
                     if label == 'Function':
                         for arg_name in item.get('args', []):
                             params_batch.append({
@@ -492,12 +492,75 @@ class GraphBuilder:
                                 'inner_line': item['line_number'],
                             })
 
-                # One UNWIND per label — replaces N individual session.run() calls
+                # Normalize batch: KuzuDB requires uniform struct keys AND
+                # consistent types across all UNWIND items.  After
+                # _sanitize_props some items may have STRING[] while others
+                # have STRING (JSON-serialised) or None for the same key.
+                # We force every field to a single canonical type.
+                if batch:
+                    import json as _json
+                    all_keys = set()
+                    for b in batch:
+                        all_keys.update(b.keys())
+
+                    for k in all_keys:
+                        # Determine dominant concrete type
+                        counts = {}
+                        for b in batch:
+                            v = b.get(k)
+                            if v is not None:
+                                counts[type(v).__name__] = counts.get(type(v).__name__, 0) + 1
+
+                        dominant = max(counts, key=counts.get) if counts else 'str'
+
+                        for b in batch:
+                            v = b.get(k)
+                            if dominant == 'list':
+                                if isinstance(v, list):
+                                    b[k] = [str(x) for x in v] if v else [""]
+                                elif isinstance(v, str) and v:
+                                    try:
+                                        p = _json.loads(v)
+                                        b[k] = [str(x) for x in p] if isinstance(p, list) and p else [""]
+                                    except Exception:
+                                        b[k] = [v]
+                                else:
+                                    b[k] = [""]
+                            elif dominant == 'int':
+                                if v is None or v == "":
+                                    b[k] = 0
+                                elif not isinstance(v, int):
+                                    try:
+                                        b[k] = int(v)
+                                    except Exception:
+                                        b[k] = 0
+                            elif dominant == 'bool':
+                                b[k] = bool(v) if v is not None else False
+                            else:
+                                if v is None:
+                                    b[k] = ""
+                                elif isinstance(v, list):
+                                    b[k] = _json.dumps(v)
+                                elif not isinstance(v, str):
+                                    b[k] = str(v)
+
+                    # Ensure consistent key order (KuzuDB structs are order-sensitive)
+                    key_order = sorted(all_keys)
+                    batch[:] = [{k: b[k] for k in key_order} for b in batch]
+
+                # One UNWIND per label — replaces N individual session.run() calls.
+                # Split into node creation + relationship linking to avoid
+                # KuzuDB "Casting between NODE and NODE" errors when MERGE
+                # on a relationship follows MERGE on a node in the same query.
+                session.run(f"""
+                    UNWIND $batch AS row
+                    MERGE (n:{label} {{name: row.name, path: $file_path, line_number: row.line_number}})
+                    SET n += row
+                """, batch=batch, file_path=file_path_str)
                 session.run(f"""
                     UNWIND $batch AS row
                     MATCH (f:File {{path: $file_path}})
-                    MERGE (n:{label} {{name: row.name, path: $file_path, line_number: row.line_number}})
-                    SET n += row
+                    MATCH (n:{label} {{name: row.name, path: $file_path, line_number: row.line_number}})
                     MERGE (f)-[:CONTAINS]->(n)
                 """, batch=batch, file_path=file_path_str)
 
@@ -780,10 +843,7 @@ class GraphBuilder:
             UNWIND $batch AS row
             MATCH (caller:Function {name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number})
             MATCH (called:Class {name: row.called_name, path: row.called_file_path})
-            OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-            WHERE init.name IN ["__init__", "constructor"]
-            WITH caller, COALESCE(init, called) as final_target, row
-            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(final_target)
+            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(called)
         """
         Q_CLS_TO_FN = """
             UNWIND $batch AS row
@@ -795,10 +855,7 @@ class GraphBuilder:
             UNWIND $batch AS row
             MATCH (caller:Class {name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number})
             MATCH (called:Class {name: row.called_name, path: row.called_file_path})
-            OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-            WHERE init.name IN ["__init__", "constructor"]
-            WITH caller, COALESCE(init, called) as final_target, row
-            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(final_target)
+            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(called)
         """
         Q_FILE_TO_FN = """
             UNWIND $batch AS row
@@ -810,10 +867,7 @@ class GraphBuilder:
             UNWIND $batch AS row
             MATCH (caller:File {path: row.caller_file_path})
             MATCH (called:Class {name: row.called_name, path: row.called_file_path})
-            OPTIONAL MATCH (called)-[:CONTAINS]->(init:Function)
-            WHERE init.name IN ["__init__", "constructor"]
-            WITH caller, COALESCE(init, called) as final_target, row
-            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(final_target)
+            CREATE (caller)-[:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(called)
         """
         
         groups = [
