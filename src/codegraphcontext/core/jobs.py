@@ -105,6 +105,12 @@ class JobManager:
                     if hasattr(job, key):
                         setattr(job, key, value)
 
+    def add_error(self, job_id: str, error_msg: str):
+        """Thread-safe append of an error message to a job."""
+        with self.lock:
+            if job_id in self.jobs:
+                self.jobs[job_id].errors.append(error_msg)
+
     def get_job(self, job_id: str) -> Optional[JobInfo]:
         """Retrieves the information for a single job."""
         with self.lock:

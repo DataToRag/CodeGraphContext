@@ -402,9 +402,10 @@ class GraphBuilder:
         file_parent_edges = []  # (parent_path, file_path, parent_label)
 
         for f in files:
-            file_path_str = str(f.resolve())
+            resolved = f.resolve()
+            file_path_str = str(resolved)
             try:
-                rel = f.resolve().relative_to(repo_path_obj)
+                rel = resolved.relative_to(repo_path_obj)
             except ValueError:
                 continue
 
@@ -430,44 +431,46 @@ class GraphBuilder:
                     SET d.name = row.name
                 """, batch=dir_batch)
 
-            # Batch create Repository->Directory CONTAINS edges
-            repo_dir_edges = [(p, c) for p, c, lbl in dir_edges if lbl == 'Repository']
-            if repo_dir_edges:
+            # Partition edges by parent label in one pass
+            repo_dir_batch, dir_dir_batch = [], []
+            for p, c, lbl in dir_edges:
+                (repo_dir_batch if lbl == 'Repository' else dir_dir_batch).append({'parent': p, 'child': c})
+
+            repo_file_batch, dir_file_batch = [], []
+            for p, c, lbl in file_parent_edges:
+                (repo_file_batch if lbl == 'Repository' else dir_file_batch).append({'parent': p, 'child': c})
+
+            if repo_dir_batch:
                 session.run("""
                     UNWIND $batch AS row
                     MATCH (r:Repository {path: row.parent})
                     MATCH (d:Directory {path: row.child})
                     MERGE (r)-[:CONTAINS]->(d)
-                """, batch=[{'parent': p, 'child': c} for p, c in repo_dir_edges])
+                """, batch=repo_dir_batch)
 
-            # Batch create Directory->Directory CONTAINS edges
-            dir_dir_edges = [(p, c) for p, c, lbl in dir_edges if lbl == 'Directory']
-            if dir_dir_edges:
+            if dir_dir_batch:
                 session.run("""
                     UNWIND $batch AS row
                     MATCH (p:Directory {path: row.parent})
                     MATCH (d:Directory {path: row.child})
                     MERGE (p)-[:CONTAINS]->(d)
-                """, batch=[{'parent': p, 'child': c} for p, c in dir_dir_edges])
+                """, batch=dir_dir_batch)
 
-            # Batch link files to parent directories/repo
-            repo_file_edges = [(p, f) for p, f, lbl in file_parent_edges if lbl == 'Repository']
-            if repo_file_edges:
+            if repo_file_batch:
                 session.run("""
                     UNWIND $batch AS row
                     MATCH (r:Repository {path: row.parent})
                     MATCH (f:File {path: row.child})
                     MERGE (r)-[:CONTAINS]->(f)
-                """, batch=[{'parent': p, 'child': c} for p, c in repo_file_edges])
+                """, batch=repo_file_batch)
 
-            dir_file_edges = [(p, f) for p, f, lbl in file_parent_edges if lbl == 'Directory']
-            if dir_file_edges:
+            if dir_file_batch:
                 session.run("""
                     UNWIND $batch AS row
                     MATCH (p:Directory {path: row.parent})
                     MATCH (f:File {path: row.child})
                     MERGE (p)-[:CONTAINS]->(f)
-                """, batch=[{'parent': p, 'child': c} for p, c in dir_file_edges])
+                """, batch=dir_file_batch)
 
     def add_files_to_graph_batch(self, file_data_list: list, repo_name: str, imports_map: dict, repo_path_str: str, use_create: bool = False):
         """Add multiple files and their contents in bulk, minimizing DB round trips.
@@ -487,8 +490,7 @@ class GraphBuilder:
 
         # Accumulators across all files
         file_nodes = []
-        node_batches = {}   # label -> list of rows (each row includes file_path)
-        contains_batches = {}  # label -> list of {file_path, name, line_number}
+        node_batches = {}   # label -> list of rows (each row includes path)
         params_batch = []
         class_fn_batch = []
         nested_fn_batch = []
@@ -531,21 +533,14 @@ class GraphBuilder:
                     continue
                 if label not in node_batches:
                     node_batches[label] = []
-                    contains_batches[label] = []
 
                 for item in item_list:
                     row = dict(item)
                     if label == 'Function' and 'cyclomatic_complexity' not in row:
                         row['cyclomatic_complexity'] = 1
                     row = self._sanitize_props(row)
-                    # Ensure file_path is in the row for cross-file batching
                     row['path'] = file_path_str
                     node_batches[label].append(row)
-                    contains_batches[label].append({
-                        'file_path': file_path_str,
-                        'name': item['name'],
-                        'line_number': item['line_number'],
-                    })
 
                     if label == 'Function':
                         for arg_name in item.get('args', []):
@@ -630,15 +625,14 @@ class GraphBuilder:
                         MERGE (n:{label} {{name: row.name, path: row.path, line_number: row.line_number}})
                         SET n += row
                     """, batch)
-                    # CONTAINS edges need separate query for MERGE mode
-                    edge_batch = contains_batches.get(label, [])
-                    if edge_batch:
-                        _chunked_run(session, f"""
-                            UNWIND $batch AS row
-                            MATCH (f:File {{path: row.file_path}})
-                            MATCH (n:{label} {{name: row.name, path: row.file_path, line_number: row.line_number}})
-                            {edge_op} (f)-[:CONTAINS]->(n)
-                        """, edge_batch)
+                    # CONTAINS edges derived from same batch (path=file_path)
+                    edge_batch = [{'file_path': r['path'], 'name': r['name'], 'line_number': r['line_number']} for r in batch]
+                    _chunked_run(session, f"""
+                        UNWIND $batch AS row
+                        MATCH (f:File {{path: row.file_path}})
+                        MATCH (n:{label} {{name: row.name, path: row.file_path, line_number: row.line_number}})
+                        {edge_op} (f)-[:CONTAINS]->(n)
+                    """, edge_batch)
 
             # 4. Parameters
             if params_batch:
@@ -849,61 +843,7 @@ class GraphBuilder:
                                 'inner_line': item['line_number'],
                             })
 
-                # Normalize batch: KuzuDB requires uniform struct keys AND
-                # consistent types across all UNWIND items.  After
-                # _sanitize_props some items may have STRING[] while others
-                # have STRING (JSON-serialised) or None for the same key.
-                # We force every field to a single canonical type.
-                if batch:
-                    import json as _json
-                    all_keys = set()
-                    for b in batch:
-                        all_keys.update(b.keys())
-
-                    for k in all_keys:
-                        # Determine dominant concrete type
-                        counts = {}
-                        for b in batch:
-                            v = b.get(k)
-                            if v is not None:
-                                counts[type(v).__name__] = counts.get(type(v).__name__, 0) + 1
-
-                        dominant = max(counts, key=counts.get) if counts else 'str'
-
-                        for b in batch:
-                            v = b.get(k)
-                            if dominant == 'list':
-                                if isinstance(v, list):
-                                    b[k] = [str(x) for x in v] if v else [""]
-                                elif isinstance(v, str) and v:
-                                    try:
-                                        p = _json.loads(v)
-                                        b[k] = [str(x) for x in p] if isinstance(p, list) and p else [""]
-                                    except Exception:
-                                        b[k] = [v]
-                                else:
-                                    b[k] = [""]
-                            elif dominant == 'int':
-                                if v is None or v == "":
-                                    b[k] = 0
-                                elif not isinstance(v, int):
-                                    try:
-                                        b[k] = int(v)
-                                    except Exception:
-                                        b[k] = 0
-                            elif dominant == 'bool':
-                                b[k] = bool(v) if v is not None else False
-                            else:
-                                if v is None:
-                                    b[k] = ""
-                                elif isinstance(v, list):
-                                    b[k] = _json.dumps(v)
-                                elif not isinstance(v, str):
-                                    b[k] = str(v)
-
-                    # Ensure consistent key order (KuzuDB structs are order-sensitive)
-                    key_order = sorted(all_keys)
-                    batch[:] = [{k: b[k] for k in key_order} for b in batch]
+                self._normalize_batch(batch)
 
                 # One UNWIND per label — replaces N individual session.run() calls.
                 # Split into node creation + relationship linking to avoid
@@ -1982,9 +1922,7 @@ class GraphBuilder:
                             nodes_created += 1
                     except Exception as file_err:
                         if job_id:
-                            job = self.job_manager.get_job(job_id)
-                            if job:
-                                job.errors.append(f"{file}: {file_err}")
+                            self.job_manager.add_error(job_id, f"{file}: {file_err}")
                     processed_count += 1
                     if processed_count % 50 == 0:
                         await asyncio.sleep(0)

@@ -179,19 +179,17 @@ class MCPServer:
 
     def add_code_to_graph_tool(self, **args) -> Dict[str, Any]:
         return indexing_handlers.add_code_to_graph(
-            self.graph_builder, 
-            self.job_manager, 
-            self.loop, 
-            self.list_indexed_repositories_tool, # Pass the wrapper or bound method so it executes correctly
+            self.graph_builder,
+            self.job_manager,
+            self.list_indexed_repositories_tool,
             **args
         )
-    
+
     def add_package_to_graph_tool(self, **args) -> Dict[str, Any]:
         return indexing_handlers.add_package_to_graph(
-            self.graph_builder, 
-            self.job_manager, 
-            self.loop, 
-            self.list_indexed_repositories_tool, 
+            self.graph_builder,
+            self.job_manager,
+            self.list_indexed_repositories_tool,
             **args
         )
 

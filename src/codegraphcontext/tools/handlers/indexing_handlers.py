@@ -1,12 +1,11 @@
 from typing import Any, Dict
 from pathlib import Path
-import asyncio
 import threading
 import os
 from ...utils.debug_log import debug_log
 from ..package_resolver import get_local_package_path
 
-def add_code_to_graph(graph_builder, job_manager, loop, list_repos_func, **args) -> Dict[str, Any]:
+def add_code_to_graph(graph_builder, job_manager, list_repos_func, **args) -> Dict[str, Any]:
     """
     Tool implementation to index a directory of code.
     Runs indexing asynchronously via a background job.
@@ -61,7 +60,7 @@ def add_code_to_graph(graph_builder, job_manager, loop, list_repos_func, **args)
         debug_log(f"Error creating background job: {str(e)}")
         return {"error": f"Failed to start background processing: {str(e)}"}
 
-def add_package_to_graph(graph_builder, job_manager, loop, list_repos_func, **args) -> Dict[str, Any]:
+def add_package_to_graph(graph_builder, job_manager, list_repos_func, **args) -> Dict[str, Any]:
     """Tool to add a package to the graph by auto-discovering its location"""
     package_name = args.get("package_name")
     language = args.get("language")
