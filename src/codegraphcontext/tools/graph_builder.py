@@ -583,69 +583,75 @@ class GraphBuilder:
                     other_imports.append(imp_copy)
 
         # ── FLUSH: Execute all batched queries ───────────────────────────
+        CHUNK = 2000  # Max items per UNWIND to avoid FalkorDB memory pressure
+
+        def _chunked_run(session, query, batch, **extra):
+            """Run a query in chunks to handle large batches."""
+            for i in range(0, len(batch), CHUNK):
+                session.run(query, batch=batch[i:i + CHUNK], **extra)
+
         with self.driver.session() as session:
             # 1. Create all File nodes
             if file_nodes:
-                session.run("""
+                _chunked_run(session, """
                     UNWIND $batch AS row
                     MERGE (f:File {path: row.path})
                     SET f.name = row.name, f.relative_path = row.relative_path,
                         f.is_dependency = row.is_dependency
-                """, batch=file_nodes)
+                """, file_nodes)
 
             # 2. Create code nodes per label
             for label, batch in node_batches.items():
                 if not batch:
                     continue
-                # Normalize batch for KuzuDB compatibility
                 self._normalize_batch(batch)
-                session.run(f"""
+                _chunked_run(session, f"""
                     UNWIND $batch AS row
                     MERGE (n:{label} {{name: row.name, path: row.path, line_number: row.line_number}})
                     SET n += row
-                """, batch=batch)
+                """, batch)
 
             # 3. Create File-[:CONTAINS]->Node edges per label
             for label, batch in contains_batches.items():
                 if not batch:
                     continue
-                session.run(f"""
+                _chunked_run(session, f"""
                     UNWIND $batch AS row
                     MATCH (f:File {{path: row.file_path}})
                     MATCH (n:{label} {{name: row.name, path: row.file_path, line_number: row.line_number}})
                     MERGE (f)-[:CONTAINS]->(n)
-                """, batch=batch)
+                """, batch)
 
             # 4. Parameters
             if params_batch:
-                session.run("""
+                _chunked_run(session, """
                     UNWIND $batch AS row
                     MATCH (fn:Function {name: row.func_name, path: row.file_path, line_number: row.line_number})
                     MERGE (p:Parameter {name: row.arg_name, path: row.file_path, function_line_number: row.line_number})
                     MERGE (fn)-[:HAS_PARAMETER]->(p)
-                """, batch=params_batch)
+                """, params_batch)
 
             # 5. Class->Function CONTAINS
             if class_fn_batch:
-                session.run("""
+                _chunked_run(session, """
                     UNWIND $batch AS row
                     MATCH (c:Class {name: row.class_name, path: row.file_path})
                     MATCH (fn:Function {name: row.func_name, path: row.file_path, line_number: row.func_line})
                     MERGE (c)-[:CONTAINS]->(fn)
-                """, batch=class_fn_batch)
+                """, class_fn_batch)
 
             # 6. Nested Function->Function CONTAINS
             if nested_fn_batch:
-                session.run("""
+                _chunked_run(session, """
                     UNWIND $batch AS row
                     MATCH (outer:Function {name: row.outer, path: row.file_path})
                     MATCH (inner:Function {name: row.inner_name, path: row.file_path, line_number: row.inner_line})
                     MERGE (outer)-[:CONTAINS]->(inner)
-                """, batch=nested_fn_batch)
+                """, nested_fn_batch)
 
             # 7. JS imports
             if js_imports:
-                session.run("""
+                _chunked_run(session, """
                     UNWIND $batch AS row
                     MATCH (f:File {path: row.file_path})
                     MERGE (m:Module {name: row.module_name})
@@ -653,11 +659,11 @@ class GraphBuilder:
                     SET r.imported_name = row.imported_name,
                         r.alias = row.alias,
                         r.line_number = row.line_number
-                """, batch=js_imports)
+                """, js_imports)
 
             # 8. Other imports
             if other_imports:
-                session.run("""
+                _chunked_run(session, """
                     UNWIND $batch AS row
                     MATCH (f:File {path: row.file_path})
                     MERGE (m:Module {name: row.name})
@@ -666,7 +672,7 @@ class GraphBuilder:
                     MERGE (f)-[r:IMPORTS]->(m)
                     SET r.line_number = row.line_number,
                         r.alias = row.alias
-                """, batch=other_imports)
+                """, other_imports)
 
     @staticmethod
     def _normalize_batch(batch: list):
@@ -1935,27 +1941,26 @@ class GraphBuilder:
             # skip a DB round-trip per file (was one MATCH query per file before).
             resolved_repo_path_str = str(path.resolve()) if path.is_dir() else str(path.parent.resolve())
 
+            # ── Phase 1: Parse all files into memory (no DB calls) ─────────
             if job_id:
-                self.job_manager.update_job(job_id, phase="node_creation")
+                self.job_manager.update_job(job_id, phase="parsing")
 
-            FLUSH_SIZE = 100  # Flush to DB every N files
             processed_count = 0
             nodes_created = 0
-            pending_batch = []  # accumulate parsed file_data for bulk flush
+            minimal_files = []  # files that couldn't be parsed (unsupported ext)
 
             for file in files:
                 if file.is_file():
-                    if job_id:
-                        self.job_manager.update_job(job_id, current_file=str(file))
+                    if job_id and processed_count % 50 == 0:
+                        self.job_manager.update_job(job_id, current_file=str(file), processed_files=processed_count)
                     repo_path = path.resolve() if path.is_dir() else file.parent.resolve()
                     try:
                         file_data = self.parse_file(repo_path, file, is_dependency)
                         if "error" not in file_data:
-                            pending_batch.append(file_data)
                             all_file_data.append(file_data)
                             nodes_created += 1 + len(file_data.get('functions', [])) + len(file_data.get('classes', []))
                         else:
-                            self.add_minimal_file_node(file, repo_path, is_dependency)
+                            minimal_files.append((file, repo_path))
                             nodes_created += 1
                     except Exception as file_err:
                         if job_id:
@@ -1963,22 +1968,24 @@ class GraphBuilder:
                             if job:
                                 job.errors.append(f"{file}: {file_err}")
                     processed_count += 1
-
-                    # Flush batch to DB periodically
-                    if len(pending_batch) >= FLUSH_SIZE:
-                        self.add_files_to_graph_batch(pending_batch, repo_name, imports_map, resolved_repo_path_str)
-                        pending_batch = []
-
-                    if job_id:
-                        self.job_manager.update_job(
-                            job_id, processed_files=processed_count, nodes_created=nodes_created,
-                        )
                     if processed_count % 50 == 0:
                         await asyncio.sleep(0)
 
-            # Flush remaining files
-            if pending_batch:
-                self.add_files_to_graph_batch(pending_batch, repo_name, imports_map, resolved_repo_path_str)
+            if job_id:
+                self.job_manager.update_job(
+                    job_id, processed_files=processed_count, nodes_created=nodes_created,
+                    phase="node_creation",
+                )
+
+            info_logger(f"Parsing complete: {len(all_file_data)} parsed, {len(minimal_files)} minimal. "
+                       f"Writing all nodes to graph...")
+
+            # ── Phase 2: Write ALL nodes in bulk (~12 total DB queries) ──
+            self.add_files_to_graph_batch(all_file_data, repo_name, imports_map, resolved_repo_path_str)
+
+            # Write minimal file nodes
+            for file, repo_path in minimal_files:
+                self.add_minimal_file_node(file, repo_path, is_dependency)
 
             # Batch-create directory hierarchy now that all File nodes exist
             self._create_directory_hierarchy_batch(files, path)
