@@ -588,7 +588,9 @@ class GraphBuilder:
                     other_imports.append(imp_copy)
 
         # ── FLUSH: Execute all batched queries ───────────────────────────
-        CHUNK = 2000  # Max items per UNWIND to avoid FalkorDB memory pressure
+        # Larger chunks = fewer queries = less per-query overhead.
+        # FalkorDB handles 50K-item UNWINDs fine in-process.
+        CHUNK = 50000
         # CREATE is ~5x faster than MERGE for initial loads (no existence check).
         node_op = "CREATE" if use_create else "MERGE"
         edge_op = "CREATE" if use_create else "MERGE"
@@ -608,17 +610,19 @@ class GraphBuilder:
                         f.is_dependency = row.is_dependency
                 """, file_nodes)
 
-            # 2. Create code nodes per label
+            # 2. Create code nodes + File-CONTAINS edges per label (combined query)
             for label, batch in node_batches.items():
                 if not batch:
                     continue
                 self._normalize_batch(batch)
                 if use_create:
-                    # CREATE is simpler — just set all properties directly
+                    # Combined: CREATE node + CREATE edge in one query (halves round trips)
                     _chunked_run(session, f"""
                         UNWIND $batch AS row
+                        MATCH (f:File {{path: row.path}})
                         CREATE (n:{label} {{name: row.name, path: row.path, line_number: row.line_number}})
                         SET n += row
+                        CREATE (f)-[:CONTAINS]->(n)
                     """, batch)
                 else:
                     _chunked_run(session, f"""
@@ -626,17 +630,15 @@ class GraphBuilder:
                         MERGE (n:{label} {{name: row.name, path: row.path, line_number: row.line_number}})
                         SET n += row
                     """, batch)
-
-            # 3. Create File-[:CONTAINS]->Node edges per label
-            for label, batch in contains_batches.items():
-                if not batch:
-                    continue
-                _chunked_run(session, f"""
-                    UNWIND $batch AS row
-                    MATCH (f:File {{path: row.file_path}})
-                    MATCH (n:{label} {{name: row.name, path: row.file_path, line_number: row.line_number}})
-                    {edge_op} (f)-[:CONTAINS]->(n)
-                """, batch)
+                    # CONTAINS edges need separate query for MERGE mode
+                    edge_batch = contains_batches.get(label, [])
+                    if edge_batch:
+                        _chunked_run(session, f"""
+                            UNWIND $batch AS row
+                            MATCH (f:File {{path: row.file_path}})
+                            MATCH (n:{label} {{name: row.name, path: row.file_path, line_number: row.line_number}})
+                            {edge_op} (f)-[:CONTAINS]->(n)
+                        """, edge_batch)
 
             # 4. Parameters
             if params_batch:
