@@ -235,27 +235,31 @@ class FalkorDBManager:
         timeout = 20 # seconds
         
         while time.time() - start_time < timeout:
-            if os.path.exists(self.socket_path):
-                # Socket created!
-                # Give it a tiny sleep to ensure listening
-                time.sleep(0.2)
-                return
-            
             # Check if process died
             if self._process.poll() is not None:
                 out, err = self._process.communicate()
                 returncode = self._process.returncode
-                
-                # Any non-zero exit code during startup means this backend is toast
-                # Raise FalkorDBUnavailableError to trigger the automatic KùzuDB fallback
                 raise FalkorDBUnavailableError(
                     f"FalkorDB Lite worker failed to start (Exit Code {returncode}).\n"
                     f"STDOUT: {out.decode().strip()}\n"
                     f"STDERR: {err.decode().strip()}"
                 )
-            
+
+            # Socket file may appear before Redis is ready to accept connections.
+            # Retry the actual connection instead of just checking file existence.
+            if os.path.exists(self.socket_path):
+                try:
+                    from falkordb import FalkorDB as FalkorDBClient
+                    d = FalkorDBClient(unix_socket_path=self.socket_path)
+                    test_graph = d.select_graph('__cgc_health_check')
+                    test_graph.query("RETURN 1")
+                    info_logger("FalkorDB Lite worker is ready.")
+                    return
+                except Exception:
+                    pass  # Not ready yet, keep waiting
+
             time.sleep(0.5)
-            
+
         raise RuntimeError("Timed out waiting for FalkorDB Lite to start.")
 
     def close_driver(self):
