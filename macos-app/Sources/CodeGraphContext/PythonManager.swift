@@ -247,13 +247,10 @@ final class PythonManager: ObservableObject {
 
     private func configureProcess(_ process: Process) {
         var env = ProcessInfo.processInfo.environment
-        // Database configuration — use FalkorDB when bundled, KuzuDB for development
-        if isBundled {
-            env["CGC_RUNTIME_DB_TYPE"] = "falkordb"
-            env["FALKORDB_PATH"] = falkorDBPath
-        } else {
-            env["CGC_RUNTIME_DB_TYPE"] = "kuzudb"
-        }
+        // Database configuration — connect to FalkorDB over TCP (Docker or bundled)
+        env["CGC_RUNTIME_DB_TYPE"] = "falkordb-remote"
+        env["FALKORDB_HOST"] = "localhost"
+        env["FALKORDB_PORT"] = "6379"
 
         // In dev mode, GUI processes don't inherit the shell PATH.
         // Append common locations where pip/pyenv/Homebrew install binaries.

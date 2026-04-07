@@ -433,9 +433,12 @@ class KuzuSessionWrapper:
                     return ""
 
                 # Only apply to explicit SET lines (not SET +=, already handled)
+                # The value pattern must handle function calls with commas inside
+                # parentheses, e.g. coalesce(row.x, m.x), so we allow nested parens.
+                _val_pat = r'(?:[^,\n()]|\([^)]*\))+'
                 if '+=' not in query:
                     query = re.sub(
-                        r'SET\s+\w+\.\w+\s*=\s*[^,\n]+(?:\s*,\s*\w+\.\w+\s*=\s*[^,\n]+)*',
+                        rf'SET\s+\w+\.\w+\s*=\s*{_val_pat}(?:\s*,\s*\w+\.\w+\s*=\s*{_val_pat})*',
                         _filter_set_clause,
                         query,
                     )
