@@ -1,0 +1,12 @@
+{
+  "name": "codegraphcontext",
+  "source": {
+    "source": "url",
+    "url": "https://github.com/DataToRag/cgc-mac.git",
+    "path": "claude-plugin"
+  },
+  "version": "1.0.0",
+  "description": "Code graph analysis powered by FalkorDB. Index, query, and visualize code relationships.",
+  "category": "developer-tools",
+  "keywords": ["code-analysis", "graph-database", "architecture", "dead-code", "dependencies"]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "codegraphcontext",
+  "description": "Code graph analysis for large codebases. Index repos into a graph database, query relationships between functions/classes/modules, find dead code, and visualize architecture.",
+  "version": "1.0.0",
+  "author": {
+    "name": "CodeGraphContext"
+  }
+}
