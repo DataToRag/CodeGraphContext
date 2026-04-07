@@ -590,101 +590,115 @@ class GraphBuilder:
         node_op = "CREATE" if use_create else "MERGE"
         edge_op = "CREATE" if use_create else "MERGE"
 
-        def _chunked_run(session, query, batch, **extra):
-            """Run a query in chunks to handle large batches."""
-            for i in range(0, len(batch), CHUNK):
-                session.run(query, batch=batch[i:i + CHUNK], **extra)
+        def _chunked_run(query, batch, **extra):
+            """Run a query in chunks using a fresh session per call."""
+            with self.driver.session() as s:
+                for i in range(0, len(batch), CHUNK):
+                    s.run(query, batch=batch[i:i + CHUNK], **extra)
 
-        with self.driver.session() as session:
-            # 1. Create all File nodes
-            if file_nodes:
-                _chunked_run(session, f"""
+        # ── Step 1: File nodes must be created first (other nodes reference them) ──
+        if file_nodes:
+            _chunked_run(f"""
+                UNWIND $batch AS row
+                {node_op} (f:File {{path: row.path}})
+                SET f.name = row.name, f.relative_path = row.relative_path,
+                    f.is_dependency = row.is_dependency
+            """, file_nodes)
+
+        # ── Step 2: All other node types + edges in parallel via thread pool ──
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        tasks = []
+
+        # Code nodes per label
+        for label, batch in node_batches.items():
+            if not batch:
+                continue
+            self._normalize_batch(batch)
+            if use_create:
+                tasks.append((f"""
                     UNWIND $batch AS row
-                    {node_op} (f:File {{path: row.path}})
-                    SET f.name = row.name, f.relative_path = row.relative_path,
-                        f.is_dependency = row.is_dependency
-                """, file_nodes)
-
-            # 2. Create code nodes + File-CONTAINS edges per label (combined query)
-            for label, batch in node_batches.items():
-                if not batch:
-                    continue
-                self._normalize_batch(batch)
-                if use_create:
-                    # Combined: CREATE node + CREATE edge in one query (halves round trips)
-                    _chunked_run(session, f"""
-                        UNWIND $batch AS row
-                        MATCH (f:File {{path: row.path}})
-                        CREATE (n:{label} {{name: row.name, path: row.path, line_number: row.line_number}})
-                        SET n += row
-                        CREATE (f)-[:CONTAINS]->(n)
-                    """, batch)
-                else:
-                    _chunked_run(session, f"""
-                        UNWIND $batch AS row
-                        MERGE (n:{label} {{name: row.name, path: row.path, line_number: row.line_number}})
-                        SET n += row
-                    """, batch)
-                    # CONTAINS edges derived from same batch (path=file_path)
-                    edge_batch = [{'file_path': r['path'], 'name': r['name'], 'line_number': r['line_number']} for r in batch]
-                    _chunked_run(session, f"""
-                        UNWIND $batch AS row
-                        MATCH (f:File {{path: row.file_path}})
-                        MATCH (n:{label} {{name: row.name, path: row.file_path, line_number: row.line_number}})
-                        {edge_op} (f)-[:CONTAINS]->(n)
-                    """, edge_batch)
-
-            # 4. Parameters
-            if params_batch:
-                _chunked_run(session, f"""
+                    MATCH (f:File {{path: row.path}})
+                    CREATE (n:{label} {{name: row.name, path: row.path, line_number: row.line_number}})
+                    SET n += row
+                    CREATE (f)-[:CONTAINS]->(n)
+                """, batch))
+            else:
+                tasks.append((f"""
                     UNWIND $batch AS row
-                    MATCH (fn:Function {{name: row.func_name, path: row.file_path, line_number: row.line_number}})
-                    {node_op} (p:Parameter {{name: row.arg_name, path: row.file_path, function_line_number: row.line_number}})
-                    {edge_op} (fn)-[:HAS_PARAMETER]->(p)
-                """, params_batch)
-
-            # 5. Class->Function CONTAINS
-            if class_fn_batch:
-                _chunked_run(session, f"""
-                    UNWIND $batch AS row
-                    MATCH (c:Class {{name: row.class_name, path: row.file_path}})
-                    MATCH (fn:Function {{name: row.func_name, path: row.file_path, line_number: row.func_line}})
-                    {edge_op} (c)-[:CONTAINS]->(fn)
-                """, class_fn_batch)
-
-            # 6. Nested Function->Function CONTAINS
-            if nested_fn_batch:
-                _chunked_run(session, f"""
-                    UNWIND $batch AS row
-                    MATCH (outer:Function {{name: row.outer, path: row.file_path}})
-                    MATCH (inner:Function {{name: row.inner_name, path: row.file_path, line_number: row.inner_line}})
-                    {edge_op} (outer)-[:CONTAINS]->(inner)
-                """, nested_fn_batch)
-
-            # 7. JS imports
-            if js_imports:
-                _chunked_run(session, f"""
+                    MERGE (n:{label} {{name: row.name, path: row.path, line_number: row.line_number}})
+                    SET n += row
+                """, batch))
+                edge_batch = [{'file_path': r['path'], 'name': r['name'], 'line_number': r['line_number']} for r in batch]
+                tasks.append((f"""
                     UNWIND $batch AS row
                     MATCH (f:File {{path: row.file_path}})
-                    MERGE (m:Module {{name: row.module_name}})
-                    {edge_op} (f)-[r:IMPORTS]->(m)
-                    SET r.imported_name = row.imported_name,
-                        r.alias = row.alias,
-                        r.line_number = row.line_number
-                """, js_imports)
+                    MATCH (n:{label} {{name: row.name, path: row.file_path, line_number: row.line_number}})
+                    {edge_op} (f)-[:CONTAINS]->(n)
+                """, edge_batch))
 
-            # 8. Other imports (always MERGE for Module nodes — may be shared across files)
-            if other_imports:
-                _chunked_run(session, f"""
-                    UNWIND $batch AS row
-                    MATCH (f:File {{path: row.file_path}})
-                    MERGE (m:Module {{name: row.name}})
-                    SET m.alias = row.alias,
-                        m.full_import_name = coalesce(row.full_import_name, m.full_import_name)
-                    {edge_op} (f)-[r:IMPORTS]->(m)
-                    SET r.line_number = row.line_number,
-                        r.alias = row.alias
-                """, other_imports)
+        if params_batch:
+            tasks.append((f"""
+                UNWIND $batch AS row
+                MATCH (fn:Function {{name: row.func_name, path: row.file_path, line_number: row.line_number}})
+                {node_op} (p:Parameter {{name: row.arg_name, path: row.file_path, function_line_number: row.line_number}})
+                {edge_op} (fn)-[:HAS_PARAMETER]->(p)
+            """, params_batch))
+
+        if class_fn_batch:
+            tasks.append((f"""
+                UNWIND $batch AS row
+                MATCH (c:Class {{name: row.class_name, path: row.file_path}})
+                MATCH (fn:Function {{name: row.func_name, path: row.file_path, line_number: row.func_line}})
+                {edge_op} (c)-[:CONTAINS]->(fn)
+            """, class_fn_batch))
+
+        if nested_fn_batch:
+            tasks.append((f"""
+                UNWIND $batch AS row
+                MATCH (outer:Function {{name: row.outer, path: row.file_path}})
+                MATCH (inner:Function {{name: row.inner_name, path: row.file_path, line_number: row.inner_line}})
+                {edge_op} (outer)-[:CONTAINS]->(inner)
+            """, nested_fn_batch))
+
+        if js_imports:
+            tasks.append((f"""
+                UNWIND $batch AS row
+                MATCH (f:File {{path: row.file_path}})
+                MERGE (m:Module {{name: row.module_name}})
+                {edge_op} (f)-[r:IMPORTS]->(m)
+                SET r.imported_name = row.imported_name,
+                    r.alias = row.alias,
+                    r.line_number = row.line_number
+            """, js_imports))
+
+        if other_imports:
+            tasks.append((f"""
+                UNWIND $batch AS row
+                MATCH (f:File {{path: row.file_path}})
+                MERGE (m:Module {{name: row.name}})
+                SET m.alias = row.alias,
+                    m.full_import_name = coalesce(row.full_import_name, m.full_import_name)
+                {edge_op} (f)-[r:IMPORTS]->(m)
+                SET r.line_number = row.line_number,
+                    r.alias = row.alias
+            """, other_imports))
+
+        # Fire all node-creation tasks concurrently, then edge-only tasks.
+        # Node creation must complete before edges that reference those nodes.
+        node_tasks = [t for t in tasks if 'CREATE (n:' in t[0] or 'MERGE (n:' in t[0]]
+        edge_tasks = [t for t in tasks if t not in node_tasks]
+
+        def _run_concurrent(task_list):
+            if not task_list:
+                return
+            with ThreadPoolExecutor(max_workers=min(len(task_list), 8)) as pool:
+                futures = [pool.submit(_chunked_run, q, b) for q, b in task_list]
+                for f in as_completed(futures):
+                    f.result()
+
+        _run_concurrent(node_tasks)
+        _run_concurrent(edge_tasks)
 
     @staticmethod
     def _normalize_batch(batch: list):
