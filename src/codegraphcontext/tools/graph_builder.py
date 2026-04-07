@@ -1470,6 +1470,22 @@ class GraphBuilder:
         return last or symbol
 
 
+    def build_graph_from_path_sync(
+        self, path: Path, is_dependency: bool = False, job_id: str = None, cgcignore_path: str = None
+    ):
+        """Synchronous wrapper for build_graph_from_path_async.
+
+        Runs the async method in a dedicated event loop so it can be called
+        from a plain background thread without blocking the main event loop.
+        """
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                self.build_graph_from_path_async(path, is_dependency, job_id, cgcignore_path)
+            )
+        finally:
+            loop.close()
+
     async def build_graph_from_path_async(
         self, path: Path, is_dependency: bool = False, job_id: str = None, cgcignore_path: str = None
     ):

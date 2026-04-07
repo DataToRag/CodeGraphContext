@@ -1,6 +1,7 @@
 from typing import Any, Dict
 from pathlib import Path
 import asyncio
+import threading
 import os
 from ...utils.debug_log import debug_log
 from ..package_resolver import get_local_package_path
@@ -37,11 +38,13 @@ def add_code_to_graph(graph_builder, job_manager, loop, list_repos_func, **args)
         job_id = job_manager.create_job(str(path_obj), is_dependency)
         job_manager.update_job(job_id, total_files=total_files, estimated_duration=estimated_time)
         
-        # Create the coroutine for the background task and schedule it on the main event loop.
-        coro = graph_builder.build_graph_from_path_async(
-            path_obj, is_dependency, job_id
+        # Run indexing in a background thread so the event loop stays responsive.
+        thread = threading.Thread(
+            target=graph_builder.build_graph_from_path_sync,
+            args=(path_obj, is_dependency, job_id),
+            daemon=True,
         )
-        asyncio.run_coroutine_threadsafe(coro, loop)
+        thread.start()
         
         debug_log(f"Started background job {job_id} for path: {str(path_obj)}, is_dependency: {is_dependency}")
         
@@ -93,10 +96,12 @@ def add_package_to_graph(graph_builder, job_manager, loop, list_repos_func, **ar
         
         job_manager.update_job(job_id, total_files=total_files, estimated_duration=estimated_time)
         
-        coro = graph_builder.build_graph_from_path_async(
-            path_obj, is_dependency, job_id
+        thread = threading.Thread(
+            target=graph_builder.build_graph_from_path_sync,
+            args=(path_obj, is_dependency, job_id),
+            daemon=True,
         )
-        asyncio.run_coroutine_threadsafe(coro, loop)
+        thread.start()
         
         debug_log(f"Started background job {job_id} for package: {package_name} at {package_path}, is_dependency: {is_dependency}")
         
