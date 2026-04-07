@@ -387,8 +387,90 @@ class GraphBuilder:
                 is_dependency=is_dependency,
             )
 
+    def _create_directory_hierarchy_batch(self, files: list, repo_path: Path):
+        """Pre-create all directory nodes and their CONTAINS hierarchy in batch.
+
+        This replaces the per-file directory creation in add_file_to_graph,
+        reducing TCP round-trips from O(files * depth) to O(unique_dirs).
+        """
+        repo_path_str = str(repo_path.resolve())
+        repo_path_obj = Path(repo_path_str)
+
+        # Collect all unique directory paths and their parent relationships
+        dir_nodes = {}  # path_str -> name
+        dir_edges = []  # (parent_path, child_path, parent_label)
+        file_parent_edges = []  # (parent_path, file_path, parent_label)
+
+        for f in files:
+            file_path_str = str(f.resolve())
+            try:
+                rel = f.resolve().relative_to(repo_path_obj)
+            except ValueError:
+                continue
+
+            parent_path = repo_path_str
+            parent_label = 'Repository'
+            for part in rel.parts[:-1]:
+                current_path = str(Path(parent_path) / part)
+                if current_path not in dir_nodes:
+                    dir_nodes[current_path] = part
+                    dir_edges.append((parent_path, current_path, parent_label))
+                parent_path = current_path
+                parent_label = 'Directory'
+
+            file_parent_edges.append((parent_path, file_path_str, parent_label))
+
+        with self.driver.session() as session:
+            # Batch create all directory nodes
+            if dir_nodes:
+                dir_batch = [{'path': p, 'name': n} for p, n in dir_nodes.items()]
+                session.run("""
+                    UNWIND $batch AS row
+                    MERGE (d:Directory {path: row.path})
+                    SET d.name = row.name
+                """, batch=dir_batch)
+
+            # Batch create Repository->Directory CONTAINS edges
+            repo_dir_edges = [(p, c) for p, c, lbl in dir_edges if lbl == 'Repository']
+            if repo_dir_edges:
+                session.run("""
+                    UNWIND $batch AS row
+                    MATCH (r:Repository {path: row.parent})
+                    MATCH (d:Directory {path: row.child})
+                    MERGE (r)-[:CONTAINS]->(d)
+                """, batch=[{'parent': p, 'child': c} for p, c in repo_dir_edges])
+
+            # Batch create Directory->Directory CONTAINS edges
+            dir_dir_edges = [(p, c) for p, c, lbl in dir_edges if lbl == 'Directory']
+            if dir_dir_edges:
+                session.run("""
+                    UNWIND $batch AS row
+                    MATCH (p:Directory {path: row.parent})
+                    MATCH (d:Directory {path: row.child})
+                    MERGE (p)-[:CONTAINS]->(d)
+                """, batch=[{'parent': p, 'child': c} for p, c in dir_dir_edges])
+
+            # Batch link files to parent directories/repo
+            repo_file_edges = [(p, f) for p, f, lbl in file_parent_edges if lbl == 'Repository']
+            if repo_file_edges:
+                session.run("""
+                    UNWIND $batch AS row
+                    MATCH (r:Repository {path: row.parent})
+                    MATCH (f:File {path: row.child})
+                    MERGE (r)-[:CONTAINS]->(f)
+                """, batch=[{'parent': p, 'child': c} for p, c in repo_file_edges])
+
+            dir_file_edges = [(p, f) for p, f, lbl in file_parent_edges if lbl == 'Directory']
+            if dir_file_edges:
+                session.run("""
+                    UNWIND $batch AS row
+                    MATCH (p:Directory {path: row.parent})
+                    MATCH (f:File {path: row.child})
+                    MERGE (p)-[:CONTAINS]->(f)
+                """, batch=[{'parent': p, 'child': c} for p, c in dir_file_edges])
+
     # First pass to add file and its contents
-    def add_file_to_graph(self, file_data: Dict, repo_name: str, imports_map: dict, repo_path_str: str = None):
+    def add_file_to_graph(self, file_data: Dict, repo_name: str, imports_map: dict, repo_path_str: str = None, skip_dir_hierarchy: bool = False):
         """Adds a file and its contents using batched UNWIND queries (one round-trip per node type)."""
         file_path_str = str(Path(file_data['path']).resolve())
         file_name = Path(file_path_str).name
@@ -419,27 +501,30 @@ class GraphBuilder:
                 SET f.name = $name, f.relative_path = $relative_path, f.is_dependency = $is_dependency
             """, path=file_path_str, name=file_name, relative_path=relative_path, is_dependency=is_dependency)
 
-            # ── Directory hierarchy + file link (one pass, sequential MERGEs) ─
-            file_path_obj = Path(file_path_str)
-            repo_path_obj = Path(resolved_repo_str)
-            relative_path_to_file = file_path_obj.relative_to(repo_path_obj)
-            parent_path = resolved_repo_str
-            parent_label = 'Repository'
-            for part in relative_path_to_file.parts[:-1]:
-                current_path_str = str(Path(parent_path) / part)
+            # ── Directory hierarchy + file link ─────────────────────────────
+            # When skip_dir_hierarchy=True, the caller handles directory
+            # creation in batch via _create_directory_hierarchy_batch().
+            if not skip_dir_hierarchy:
+                file_path_obj = Path(file_path_str)
+                repo_path_obj = Path(resolved_repo_str)
+                relative_path_to_file = file_path_obj.relative_to(repo_path_obj)
+                parent_path = resolved_repo_str
+                parent_label = 'Repository'
+                for part in relative_path_to_file.parts[:-1]:
+                    current_path_str = str(Path(parent_path) / part)
+                    session.run(f"""
+                        MATCH (p:{parent_label} {{path: $parent_path}})
+                        MERGE (d:Directory {{path: $current_path}})
+                        SET d.name = $part
+                        MERGE (p)-[:CONTAINS]->(d)
+                    """, parent_path=parent_path, current_path=current_path_str, part=part)
+                    parent_path = current_path_str
+                    parent_label = 'Directory'
                 session.run(f"""
                     MATCH (p:{parent_label} {{path: $parent_path}})
-                    MERGE (d:Directory {{path: $current_path}})
-                    SET d.name = $part
-                    MERGE (p)-[:CONTAINS]->(d)
-                """, parent_path=parent_path, current_path=current_path_str, part=part)
-                parent_path = current_path_str
-                parent_label = 'Directory'
-            session.run(f"""
-                MATCH (p:{parent_label} {{path: $parent_path}})
-                MATCH (f:File {{path: $path}})
-                MERGE (p)-[:CONTAINS]->(f)
-            """, parent_path=parent_path, path=file_path_str)
+                    MATCH (f:File {{path: $path}})
+                    MERGE (p)-[:CONTAINS]->(f)
+                """, parent_path=parent_path, path=file_path_str)
 
             # ── Batch UPSERT all code nodes (functions, classes, etc.) ────────
             # To add a new language-specific node type (e.g., 'Trait' for Rust):
@@ -1615,7 +1700,7 @@ class GraphBuilder:
                     try:
                         file_data = self.parse_file(repo_path, file, is_dependency)
                         if "error" not in file_data:
-                            self.add_file_to_graph(file_data, repo_name, imports_map, repo_path_str=resolved_repo_path_str)
+                            self.add_file_to_graph(file_data, repo_name, imports_map, repo_path_str=resolved_repo_path_str, skip_dir_hierarchy=True)
                             all_file_data.append(file_data)
                             # Count nodes: 1 file + functions + classes
                             nodes_created += 1 + len(file_data.get('functions', [])) + len(file_data.get('classes', []))
@@ -1635,6 +1720,9 @@ class GraphBuilder:
                         )
                     if processed_count % 50 == 0:
                         await asyncio.sleep(0)
+
+            # Batch-create directory hierarchy now that all File nodes exist
+            self._create_directory_hierarchy_batch(files, path)
 
             info_logger(f"File processing complete. {len(all_file_data)} files parsed. "
                        f"Starting post-processing phase (inheritance + function calls)...")
