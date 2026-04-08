@@ -195,58 +195,45 @@ Phases: `parsing` → `node_creation` → `relationship_linking` → `completed`
 
 ---
 
-## RamPump Real-World Results (9,382 files)
+## RamPump Real-World Results (5,542 code files)
 
-| Phase | Time | Notes |
-|-------|------|-------|
-| Parsing | ~2m 30s | 9,382 files parsed, 84,501 nodes extracted via tree-sitter |
-| Node creation | 15m+ (in progress) | 84K CREATE operations via FalkorDB Lite embedded |
-| Relationship linking | TBD | Inheritance + function call resolution |
-| **Total** | **~20m+ estimated** | |
-
-### Final Results (Docker FalkorDB, all optimizations, CALLS fix)
+### Final Results — Standalone FalkorDB (bundled binary)
 
 | Phase | Time | Details |
 |-------|------|---------|
 | Parsing | ~2 min | 5,542 code files (vendor/minified/bower excluded) |
-| Node creation | ~5 min | 148,793 nodes via batched CREATE + thread pool |
-| Relationship linking | ~5 min | 28,229 CALLS + 1,506 INHERITS edges |
-| **Total** | **12m 16s (736s)** | **Full graph with CALLS** |
+| Node creation | ~3.5 min | ~150K nodes via batched CREATE + thread pool |
+| Relationship linking | ~3.5 min | ~28K CALLS + ~1.5K INHERITS edges |
+| **Total** | **9m 15s (555s)** | **Full graph with all node types** |
 
-**Final graph**: 148,793 nodes (65K Variables, 38K Parameters, 27K Functions, 6.6K Files, 5K Modules, 4K Classes) + 211,503 edges (120K CONTAINS, 38K HAS_PARAMETER, 28K CALLS, 24K IMPORTS, 1.5K INHERITS).
+### Backend Comparison
 
-**CALLS fix**: The call resolver was generating 600K+ spurious edges by matching common names globally. Three fixes:
-1. Skip minified JS names (<=2 chars: `a`, `i`, `t`, etc.)
-2. Require imports for cross-file resolution (don't match just because a name exists somewhere)
-3. Skip vendor/minified/bundled files entirely (*.min.js, vendor/, bower/)
+| Backend | Time | Setup | Stability |
+|---------|------|-------|-----------|
+| **Standalone FalkorDB (bundled)** | **9m 15s** | Bundle redis-server + falkordb.so | Stable |
+| Docker FalkorDB | 12m 16s | `docker run falkordb/falkordb` | Stable |
+| FalkorDB Lite (redislite) | Crashed | `pip install falkordblite` | Unstable (wrapper bug) |
 
-Key finding: Variables (101K) and Parameters (55K) were 76% of all nodes but rarely queried. Dropping them cut actual DB writes from ~205K to ~81K nodes.
+The standalone binary is 25% faster than Docker (no container/TCP overhead) and avoids the redislite wrapper bug that caused FalkorDB Lite crashes. It uses the exact same `redis-server` + `falkordb.so` binaries — the Mac app manages the process directly via Swift.
 
-### FalkorDB Lite vs Docker
+### CALLS Resolver Fix
 
-| Metric | FalkorDB Lite (embedded) | Docker FalkorDB (TCP) |
-|--------|-------------------------|----------------------|
-| Node creation (81K) | ~10 min | ~3 min |
-| Stability | Crashed at 3h (broken pipe) | Stable |
-| Relationship linking | Failed | Works (but slow due to CALLS bug) |
-| Setup | ARM64 .so patching required | `docker run falkordb/falkordb` |
+The call resolver was generating **600K+ spurious edges** by matching common function names globally. Three fixes reduced this to **~28K edges**:
 
-Docker FalkorDB is 3x faster on node creation and doesn't crash under load.
+1. **Skip minified JS names** (<=2 chars: `a`, `i`, `t`, etc.) — these are bundled code artifacts
+2. **Require imports for cross-file resolution** — don't match just because a name exists somewhere
+3. **Skip vendor/minified/bundled files** entirely (`*.min.js`, `vendor/`, `bower/`)
 
-### Bottleneck Analysis
+This was the single biggest performance win — relationship linking went from 1-3+ hours to ~3.5 minutes.
 
-The node creation phase dominates total time. Even with CREATE (no existence check) and 50K chunk sizes (minimal round trips), FalkorDB's internal processing of each UNWIND item is ~0.2ms. For 84K nodes: 84,000 x 0.2ms = ~17 seconds of pure processing, but the observed time is much higher due to:
-- Property serialization overhead (each node has ~10-15 properties)
-- Index maintenance on each CREATE
-- Redis protocol serialization for large UNWIND batches
-- Graph storage engine write amplification
+### File Filtering
 
-### Potential Future Optimizations
-
-- **FalkorDB GRAPH.BULK import API** — if FalkorDB adds a bulk loader, could bypass the Cypher/UNWIND path entirely
-- **Reduce node count** — skip Variable/Parameter nodes for initial fast index, add them in a second pass
-- **Parallel graph writes** — use separate FalkorDB graph instances per file type, merge after
-- **Embedded mode tuning** — investigate FalkorDB server config (thread count, memory allocation)
+| Filter | Files removed | Impact |
+|--------|--------------|--------|
+| IGNORE_DIRS (node_modules, etc.) | 94,747 | Standard gitignore-style |
+| Vendor/bower/minified patterns | 2,202 | Bundled third-party code |
+| Non-code files | Kept as minimal File nodes | Complete directory hierarchy |
+| **Final code files** | **5,542** | Parsed by tree-sitter |
 
 ---
 
