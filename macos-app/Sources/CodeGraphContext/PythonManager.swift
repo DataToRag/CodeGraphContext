@@ -41,13 +41,8 @@ final class PythonManager: ObservableObject {
     }
 
     // MARK: - FalkorDB Configuration
-
-    var falkorDBPath: String {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let cgcDir = appSupport.appendingPathComponent("CodeGraphContext")
-        try? FileManager.default.createDirectory(at: cgcDir, withIntermediateDirectories: true)
-        return cgcDir.appendingPathComponent("falkordb.db").path
-    }
+    // FalkorDB Lite uses CGC's default global DB path: ~/.codegraphcontext/global/db/falkordb
+    // This is managed by CGC's resolve_context() — we just set the DB type.
 
     // MARK: - Lifecycle
 
@@ -247,8 +242,8 @@ final class PythonManager: ObservableObject {
     private func configureProcess(_ process: Process) {
         var env = ProcessInfo.processInfo.environment
         // Database configuration — embedded FalkorDB Lite (no external dependencies)
+        // DB path is managed by CGC's resolve_context() at ~/.codegraphcontext/global/db/falkordb
         env["CGC_RUNTIME_DB_TYPE"] = "falkordb"
-        env["FALKORDB_PATH"] = falkorDBPath
 
         // In dev mode, GUI processes don't inherit the shell PATH.
         // Append common locations where pip/pyenv/Homebrew install binaries.
