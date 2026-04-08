@@ -51,8 +51,8 @@ struct SettingsView: View {
             }
 
             Section("Database") {
-                LabeledContent("FalkorDB") {
-                    Text("Docker container on localhost:6379")
+                LabeledContent("FalkorDB Lite") {
+                    Text("Embedded (no external dependencies)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
