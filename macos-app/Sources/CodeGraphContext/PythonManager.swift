@@ -6,7 +6,9 @@ import os
 final class PythonManager: ObservableObject {
     @Published var isMCPServerRunning = false
     @Published var isVizServerRunning = false
+    @Published var isFalkorDBRunning = false
 
+    private var falkorDBProcess: Process?
     private var mcpProcess: Process?
     private var vizProcess: Process?
     private var healthCheckTimer: Timer?
@@ -20,6 +22,7 @@ final class PythonManager: ObservableObject {
 
     var mcpPort: Int = 47321
     var vizPort: Int = 47322
+    let falkorDBPort = 6379
 
     /// Path to the bundled Python interpreter inside the app bundle.
     /// Falls back to system python3 during development.
@@ -40,13 +43,67 @@ final class PythonManager: ObservableObject {
         return false
     }
 
-    // MARK: - FalkorDB Configuration
-    // FalkorDB Lite uses CGC's default global DB path: ~/.codegraphcontext/global/db/falkordb
-    // This is managed by CGC's resolve_context() — we just set the DB type.
+    // MARK: - FalkorDB Bundled Server
+
+    /// Path to bundled redis-server binary (in app bundle or dev build)
+    var redisServerPath: String? {
+        // 1. App bundle
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("falkordb/redis-server").path,
+           FileManager.default.fileExists(atPath: bundled) {
+            return bundled
+        }
+        // 2. Dev build directory (from bundle-falkordb.sh)
+        let devPath = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("build/falkordb/redis-server").path
+        if FileManager.default.fileExists(atPath: devPath) {
+            return devPath
+        }
+        // 3. From falkordblite pip package (dev fallback)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let pipPath = "\(home)/.pyenv/versions/3.12.4/lib/python3.12/site-packages/redislite/bin/redis-server"
+        if FileManager.default.fileExists(atPath: pipPath) {
+            return pipPath
+        }
+        return nil
+    }
+
+    /// Path to bundled falkordb.so module
+    var falkorDBModulePath: String? {
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("falkordb/falkordb.so").path,
+           FileManager.default.fileExists(atPath: bundled) {
+            return bundled
+        }
+        let devPath = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("build/falkordb/falkordb.so").path
+        if FileManager.default.fileExists(atPath: devPath) {
+            return devPath
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let pipPath = "\(home)/.pyenv/versions/3.12.4/lib/python3.12/site-packages/redislite/bin/falkordb.so"
+        if FileManager.default.fileExists(atPath: pipPath) {
+            return pipPath
+        }
+        return nil
+    }
+
+    /// Data directory for FalkorDB persistence
+    var falkorDBDataDir: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("CodeGraphContext/falkordb")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    var falkorDBSocketPath: String {
+        falkorDBDataDir.appendingPathComponent("falkordb.sock").path
+    }
 
     // MARK: - Lifecycle
 
     func startAll() {
+        startFalkorDB()
         startMCPServer()
         startVizServer()
         startHealthChecks()
@@ -56,6 +113,73 @@ final class PythonManager: ObservableObject {
         stopHealthChecks()
         stopMCPServer()
         stopVizServer()
+        stopFalkorDB()
+    }
+
+    // MARK: - FalkorDB Server
+
+    func startFalkorDB() {
+        guard falkorDBProcess == nil else { return }
+        guard let serverPath = redisServerPath, let modulePath = falkorDBModulePath else {
+            logger.error("FalkorDB binaries not found. Run scripts/bundle-falkordb.sh first.")
+            return
+        }
+
+        logger.info("Starting FalkorDB server...")
+
+        // Remove stale socket
+        try? FileManager.default.removeItem(atPath: falkorDBSocketPath)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: serverPath)
+        process.arguments = [
+            "--loadmodule", modulePath,
+            "--unixsocket", falkorDBSocketPath,
+            "--unixsocketperm", "700",
+            "--port", String(falkorDBPort),
+            "--dir", falkorDBDataDir.path,
+            "--dbfilename", "dump.rdb",
+            "--save", "900", "1",      // Save to disk every 15min if >=1 change
+            "--save", "300", "100",    // Save every 5min if >=100 changes
+            "--loglevel", "warning",
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        process.terminationHandler = { [weak self] proc in
+            Task { @MainActor in
+                self?.logger.warning("FalkorDB exited with code \(proc.terminationStatus)")
+                self?.falkorDBProcess = nil
+                self?.isFalkorDBRunning = false
+            }
+        }
+
+        do {
+            try process.run()
+            falkorDBProcess = process
+            isFalkorDBRunning = true
+            logger.info("FalkorDB started (PID \(process.processIdentifier))")
+
+            // Wait for socket to appear
+            for _ in 0..<40 {
+                if FileManager.default.fileExists(atPath: falkorDBSocketPath) {
+                    logger.info("FalkorDB socket ready at \(self.falkorDBSocketPath)")
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            logger.error("FalkorDB socket did not appear within 20s")
+        } catch {
+            logger.error("Failed to start FalkorDB: \(error)")
+        }
+    }
+
+    func stopFalkorDB() {
+        guard let process = falkorDBProcess, process.isRunning else { return }
+        logger.info("Stopping FalkorDB server")
+        process.terminate()
+        falkorDBProcess = nil
+        isFalkorDBRunning = false
     }
 
     // MARK: - MCP Server
@@ -241,9 +365,10 @@ final class PythonManager: ObservableObject {
 
     private func configureProcess(_ process: Process) {
         var env = ProcessInfo.processInfo.environment
-        // Database configuration — embedded FalkorDB Lite (no external dependencies)
-        // DB path is managed by CGC's resolve_context() at ~/.codegraphcontext/global/db/falkordb
-        env["CGC_RUNTIME_DB_TYPE"] = "falkordb"
+        // Database: connect to the bundled FalkorDB server via TCP
+        env["CGC_RUNTIME_DB_TYPE"] = "falkordb-remote"
+        env["FALKORDB_HOST"] = "localhost"
+        env["FALKORDB_PORT"] = String(falkorDBPort)
 
         // In dev mode, GUI processes don't inherit the shell PATH.
         // Append common locations where pip/pyenv/Homebrew install binaries.
