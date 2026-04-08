@@ -32,6 +32,18 @@ DEFAULT_IGNORE_PATTERNS = [
     "out/",
     ".git/",
     "__pycache__/",
+    # Minified / bundled JS (single-letter variable names pollute the graph)
+    "*.min.js",
+    "*.min.css",
+    "*.bundle.js",
+    "*.chunk.js",
+    "*.packed.js",
+    "*.prod.js",
+    # Vendor directories commonly containing bundled third-party code
+    "vendor/",
+    "bower/",
+    "bower_components/",
+    # Binary / media files
     "*.png",
     "*.jpg",
     "*.jpeg",
@@ -1574,6 +1586,14 @@ class GraphBuilder:
         if not parser:
             warning_logger(f"No parser found for file extension {path.suffix}. Skipping {path}")
             return {"path": str(path), "error": f"No parser for {path.suffix}"}
+
+        # Skip large files (>500KB) — likely minified/bundled code
+        try:
+            if path.stat().st_size > 500_000:
+                debug_log(f"[parse_file] Skipping large file ({path.stat().st_size // 1024}KB): {path}")
+                return {"path": str(path), "error": "File too large (likely minified/bundled)"}
+        except OSError:
+            pass
 
         debug_log(f"[parse_file] Starting parsing for: {path} with {parser.language_name} parser")
         try:
