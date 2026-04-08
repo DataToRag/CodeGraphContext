@@ -966,81 +966,80 @@ class GraphBuilder:
 
     # Second pass to create relationships that depend on all files being present like call functions and class inheritance
     def _resolve_function_call(self, call: Dict, caller_file_path: str, local_names: set, local_imports: dict, imports_map: dict, skip_external: bool) -> Optional[Dict]:
-        """Resolve a single function call to its target. Returns a dict with call params or None if skipped."""
+        """Resolve a single function call to its target. Returns a dict with call params or None if skipped.
+
+        Resolution strategy (strict — only create edges we're confident about):
+        1. self/this/super/cls calls → same file
+        2. Name defined locally in this file → same file
+        3. Inferred object type → look up in imports_map
+        4. Name imported in this file → resolve via import path
+        5. Name exists in exactly one file in the repo → unambiguous
+        6. Otherwise → skip (don't create spurious edges)
+        """
         called_name = call['name']
-        if called_name in __builtins__: return None
+        if called_name in __builtins__:
+            return None
 
         resolved_path = None
         full_call = call.get('full_name', called_name)
         base_obj = full_call.split('.')[0] if '.' in full_call else None
-        
+
         is_chained_call = full_call.count('.') > 1 if '.' in full_call else False
-        
+
         if is_chained_call and base_obj in ('self', 'this', 'super', 'super()', 'cls', '@'):
             lookup_name = called_name
         else:
             lookup_name = base_obj if base_obj else called_name
 
+        # 1. self/this/super/cls → same file
         if base_obj in ('self', 'this', 'super', 'super()', 'cls', '@') and not is_chained_call:
             resolved_path = caller_file_path
+
+        # 2. Locally defined name → same file
         elif lookup_name in local_names:
             resolved_path = caller_file_path
+
+        # 3. Inferred object type → imports_map
         elif call.get('inferred_obj_type'):
             obj_type = call['inferred_obj_type']
             possible_paths = imports_map.get(obj_type, [])
-            if len(possible_paths) > 0:
+            if len(possible_paths) == 1:
                 resolved_path = possible_paths[0]
-        
+
+        # 4. Name imported in this file → resolve via import
+        if not resolved_path and lookup_name in local_imports:
+            full_import_name = local_imports[lookup_name]
+            # Try direct match on full import name
+            if full_import_name in imports_map:
+                direct_paths = imports_map[full_import_name]
+                if direct_paths and len(direct_paths) == 1:
+                    resolved_path = direct_paths[0]
+            # Try matching import path against file paths
+            if not resolved_path:
+                possible_paths = imports_map.get(lookup_name, [])
+                for p in possible_paths:
+                    if full_import_name.replace('.', '/') in p:
+                        resolved_path = p
+                        break
+
+        # 5. Unambiguous: name exists in exactly one file
         if not resolved_path:
             possible_paths = imports_map.get(lookup_name, [])
             if len(possible_paths) == 1:
                 resolved_path = possible_paths[0]
-            elif len(possible_paths) > 1:
-                if lookup_name in local_imports:
-                    full_import_name = local_imports[lookup_name]
-                    if full_import_name in imports_map:
-                         direct_paths = imports_map[full_import_name]
-                         if direct_paths and len(direct_paths) == 1:
-                             resolved_path = direct_paths[0]
-                    if not resolved_path:
-                        for path in possible_paths:
-                            if full_import_name.replace('.', '/') in path:
-                                resolved_path = path
-                                break
-        
+
+        # 6. Final check: called_name (not lookup_name) in local names
+        if not resolved_path and called_name != lookup_name and called_name in local_names:
+            resolved_path = caller_file_path
+
+        # If still unresolved, skip — don't create spurious edges
         if not resolved_path:
-            is_unresolved_external = True
-        else:
-            is_unresolved_external = False
-        
-        # Legacy fallback
-        if not resolved_path:
-            possible_paths = imports_map.get(lookup_name, [])
-            if len(possible_paths) > 0:
-                 if lookup_name in local_imports:
-                     pass
-                 else:
-                    pass
-        if not resolved_path:
-            if called_name in local_names:
-                resolved_path = caller_file_path
-                is_unresolved_external = False
-            elif called_name in imports_map and imports_map[called_name]:
-                candidates = imports_map[called_name]
-                for path in candidates:
-                    for imp_name in local_imports.values():
-                        if imp_name.replace('.', '/') in path:
-                            resolved_path = path
-                            is_unresolved_external = False
-                            break
-                    if resolved_path: break
-                if not resolved_path:
-                    resolved_path = candidates[0]
-            else:
-                resolved_path = caller_file_path
-        
-        if skip_external and is_unresolved_external:
             return None
+
+        if skip_external and resolved_path != caller_file_path:
+            # Check if this is an external (non-imported) reference
+            if lookup_name not in local_imports and lookup_name not in local_names:
+                return None
 
         caller_context = call.get('context')
         if caller_context and len(caller_context) == 3 and caller_context[0] is not None:
