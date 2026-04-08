@@ -13,8 +13,11 @@
 | **v2 (cross-file batch)** | 25.2 ms | 4.11s | ~12 per flush | Accumulate nodes across files, flush every 100 |
 | **v3 (parse-then-write)** | 26.1 ms | 4.29s | ~12 total | Parse ALL files first, single batch write |
 | **v4 (large chunks + combined)** | 4.5 ms | 2.72s | ~6 | 50K chunk size, CREATE+CONTAINS in one query |
+| **v5 (code-only files)** | 4.5 ms | 2.86s | ~6 | Skip non-code files (31% fewer files for RamPump) |
+| **v6 (concurrent writes)** | 4.9 ms | 2.78s | ~6 | Thread pool for parallel node type writes |
+| **v7 (skip vars+params)** | 2.2 ms | 3.35s | ~10 | Drop Variable/Parameter nodes (76% of total) |
 
-**Overall improvement: 6.37s → 2.72s (57% faster), round trips: 456 → ~6 (99% reduction)**
+**Overall improvement: 6.37s → 3.35s (47% faster), node count: 205K → 49K (76% reduction), round trips: 456 → ~10 (98% reduction)**
 
 ---
 
@@ -196,12 +199,52 @@ Phases: `parsing` → `node_creation` → `relationship_linking` → `completed`
 
 | Phase | Time | Notes |
 |-------|------|-------|
-| Parsing | ~2m 30s | 9,382 files, 84,501 nodes extracted |
-| Node creation | TBD | 84K CREATE operations via FalkorDB Lite |
+| Parsing | ~2m 30s | 9,382 files parsed, 84,501 nodes extracted via tree-sitter |
+| Node creation | 15m+ (in progress) | 84K CREATE operations via FalkorDB Lite embedded |
 | Relationship linking | TBD | Inheritance + function call resolution |
-| **Total** | **TBD** | |
+| **Total** | **~20m+ estimated** | |
 
-The node creation phase for 84K nodes is the remaining bottleneck — FalkorDB's graph engine processes CREATE operations sequentially. With 50K chunk size, this is ~6 queries total but each query processes tens of thousands of items.
+### Final Results (Docker FalkorDB, all optimizations)
+
+| Phase | Time | Details |
+|-------|------|---------|
+| Filter + list | 6s | 6,429 code files (31% fewer after skipping non-code) |
+| Pre-scan imports | 26s | Build imports map for cross-file resolution |
+| Parse (tree-sitter) | 99s (1m 39s) | 15.4ms/file, 81,518 nodes extracted |
+| Node creation (CREATE) | 190s (3m 10s) | 81K nodes via batched CREATE + thread pool |
+| Directory hierarchy | 6s | Batch MERGE for directory tree |
+| Inheritance links | 2s | INHERITS edges |
+| **Total** | **328s (5m 28s)** | **Without CALLS edges** |
+
+**CALLS edges disabled** — the upstream call resolver generates 600K+ spurious edges via aggressive name-based matching (e.g., `get`, `render`, `init` matched across unrelated files). This is a bug in `_resolve_function_call`, not a performance issue. With CALLS enabled, indexing takes 1-3+ hours and may crash FalkorDB Lite.
+
+Key finding: Variables (101K) and Parameters (55K) were 76% of all nodes but rarely queried. Dropping them cut actual DB writes from ~205K to ~81K nodes.
+
+### FalkorDB Lite vs Docker
+
+| Metric | FalkorDB Lite (embedded) | Docker FalkorDB (TCP) |
+|--------|-------------------------|----------------------|
+| Node creation (81K) | ~10 min | ~3 min |
+| Stability | Crashed at 3h (broken pipe) | Stable |
+| Relationship linking | Failed | Works (but slow due to CALLS bug) |
+| Setup | ARM64 .so patching required | `docker run falkordb/falkordb` |
+
+Docker FalkorDB is 3x faster on node creation and doesn't crash under load.
+
+### Bottleneck Analysis
+
+The node creation phase dominates total time. Even with CREATE (no existence check) and 50K chunk sizes (minimal round trips), FalkorDB's internal processing of each UNWIND item is ~0.2ms. For 84K nodes: 84,000 x 0.2ms = ~17 seconds of pure processing, but the observed time is much higher due to:
+- Property serialization overhead (each node has ~10-15 properties)
+- Index maintenance on each CREATE
+- Redis protocol serialization for large UNWIND batches
+- Graph storage engine write amplification
+
+### Potential Future Optimizations
+
+- **FalkorDB GRAPH.BULK import API** — if FalkorDB adds a bulk loader, could bypass the Cypher/UNWIND path entirely
+- **Reduce node count** — skip Variable/Parameter nodes for initial fast index, add them in a second pass
+- **Parallel graph writes** — use separate FalkorDB graph instances per file type, merge after
+- **Embedded mode tuning** — investigate FalkorDB server config (thread count, memory allocation)
 
 ---
 
