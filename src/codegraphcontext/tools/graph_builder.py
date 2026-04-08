@@ -979,6 +979,9 @@ class GraphBuilder:
         called_name = call['name']
         if called_name in __builtins__:
             return None
+        # Skip single/two-char names — these are minified JS artifacts (a, i, t, e, etc.)
+        if len(called_name) <= 2:
+            return None
 
         resolved_path = None
         full_call = call.get('full_name', called_name)
@@ -1022,10 +1025,10 @@ class GraphBuilder:
                         resolved_path = p
                         break
 
-        # 5. Unambiguous: name exists in exactly one file
+        # 5. Unambiguous: name exists in exactly one file AND is imported by caller
         if not resolved_path:
             possible_paths = imports_map.get(lookup_name, [])
-            if len(possible_paths) == 1:
+            if len(possible_paths) == 1 and lookup_name in local_imports:
                 resolved_path = possible_paths[0]
 
         # 6. Final check: called_name (not lookup_name) in local names
