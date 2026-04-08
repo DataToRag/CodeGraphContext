@@ -1050,11 +1050,17 @@ class GraphBuilder:
                     direct_paths = imports_map[full_import_name]
                     if direct_paths and len(direct_paths) == 1:
                         resolved_path = direct_paths[0]
-            # 4c. Try matching import path against file paths
+            # 4c. Match import module path against file paths.
+            #     For "from nativo_mcp.tools import call_controller",
+            #     full_import_name = "nativo_mcp.tools.call_controller".
+            #     The module path is "nativo_mcp/tools" (strip the function name).
             if not resolved_path:
                 possible_paths = imports_map.get(lookup_name, [])
+                # Strip function/class name from import path to get module path
+                import_parts = full_import_name.replace('.', '/').rsplit('/', 1)
+                module_path = import_parts[0] if len(import_parts) > 1 else full_import_name.replace('.', '/')
                 for p in possible_paths:
-                    if full_import_name.replace('.', '/') in p:
+                    if module_path in p:
                         resolved_path = p
                         break
 
@@ -1144,7 +1150,7 @@ class GraphBuilder:
             func_names = {f['name'] for f in file_data.get('functions', [])}
             class_names = {c['name'] for c in file_data.get('classes', [])}
             local_names = func_names | class_names
-            local_imports = {imp.get('alias') or imp['name'].split('.')[-1]: imp['name'] 
+            local_imports = {imp.get('alias') or imp['name'].split('.')[-1]: imp.get('full_import_name', imp['name'])
                             for imp in file_data.get('imports', [])}
             
             for call in file_data.get('function_calls', []):

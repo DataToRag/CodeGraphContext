@@ -344,37 +344,49 @@ class PythonTreeSitterParser:
                 elif capture_name == 'from_import_stmt':
                     module_name_node = node.child_by_field_name('module_name')
                     if not module_name_node: continue
-                    
+
                     module_name = self._get_node_text(module_name_node)
-                    
-                    # Handle 'from ... import ...'
-                    import_list_node = node.child_by_field_name('name')
-                    if import_list_node:
-                        for child in import_list_node.children:
-                            imported_name = None
-                            alias = None
-                            if child.type == 'aliased_import':
-                                name_node = child.child_by_field_name('name')
-                                alias_node = child.child_by_field_name('alias')
-                                if name_node: imported_name = self._get_node_text(name_node)
-                                if alias_node: alias = self._get_node_text(alias_node)
-                            elif child.type == 'dotted_name' or child.type == 'identifier':
-                                imported_name = self._get_node_text(child)
-                            
-                            if imported_name:
-                                full_import_name = f"{module_name}.{imported_name}"
-                                if full_import_name in seen_modules:                                                                                                
-                                    continue                                                                                                                        
-                                seen_modules.add(full_import_name) 
-                                imports.append({
-                                    "name": imported_name,
-                                    "full_import_name": full_import_name,
-                                    "line_number": child.start_point[0] + 1,
-                                    "alias": alias,
-                                    "context": self._get_parent_context(child)[:2],
-                                    "lang": self.language_name,
-                                    "is_dependency": False,
-                                })
+
+                    # Handle 'from ... import A, B, C' or 'from ... import (A, B, C)'
+                    # Iterate ALL children of the import_from_statement to find
+                    # every imported name (dotted_name, identifier, aliased_import).
+                    # child_by_field_name('name') only returns the first match.
+                    found_import_keyword = False
+                    for child in node.children:
+                        # Skip everything before the 'import' keyword
+                        if child.type == 'import':
+                            found_import_keyword = True
+                            continue
+                        if not found_import_keyword:
+                            continue
+                        # Skip punctuation
+                        if child.type in (',', '(', ')'):
+                            continue
+
+                        imported_name = None
+                        alias = None
+                        if child.type == 'aliased_import':
+                            name_node = child.child_by_field_name('name')
+                            alias_node = child.child_by_field_name('alias')
+                            if name_node: imported_name = self._get_node_text(name_node)
+                            if alias_node: alias = self._get_node_text(alias_node)
+                        elif child.type in ('dotted_name', 'identifier'):
+                            imported_name = self._get_node_text(child)
+
+                        if imported_name:
+                            full_import_name = f"{module_name}.{imported_name}"
+                            if full_import_name in seen_modules:
+                                continue
+                            seen_modules.add(full_import_name)
+                            imports.append({
+                                "name": imported_name,
+                                "full_import_name": full_import_name,
+                                "line_number": child.start_point[0] + 1,
+                                "alias": alias,
+                                "context": self._get_parent_context(child)[:2],
+                                "lang": self.language_name,
+                                "is_dependency": False,
+                            })
 
         return imports
 
