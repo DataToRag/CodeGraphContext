@@ -262,6 +262,14 @@ This was the single biggest performance win — relationship linking went from 1
 
 ## Database Backend
 
-- **FalkorDB Lite** (embedded, in-process via Unix socket)
-- ARM64 macOS requires replacing the x86-64 `falkordb.so` from `falkordblite` with the official ARM64 macOS build from [FalkorDB releases](https://github.com/FalkorDB/FalkorDB/releases)
-- No Docker or external processes required
+**Standalone FalkorDB** — the Mac app bundles `redis-server` + `falkordb.so` (ARM64 macOS) and manages the process directly via Swift. No Docker, no redislite wrapper, no external dependencies.
+
+- `redis-server` (2.7MB) + `falkordb.so` (30MB) downloaded via `scripts/bundle-falkordb.sh`
+- ARM64 macOS `falkordb.so` from [FalkorDB releases](https://github.com/FalkorDB/FalkorDB/releases)
+- Data persists at `~/Library/Application Support/CodeGraphContext/falkordb/`
+- MCP server connects via `falkordb-remote` (TCP localhost:6379)
+- MCP server starts independently — auto-reconnects to FalkorDB when available
+
+### Why Not FalkorDB Lite (redislite)?
+
+The `falkordblite` pip package wraps `redis-server` via the `redislite` Python library. While the underlying `redis-server` binary is stable, the Python wrapper has a bug: it loses its connection to the child redis-server process during heavy writes, causing "broken pipe" / "no such file or directory" errors. The standalone approach uses the same binaries but manages them directly from Swift, avoiding the wrapper entirely.
