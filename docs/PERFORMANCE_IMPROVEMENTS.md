@@ -204,19 +204,21 @@ Phases: `parsing` → `node_creation` → `relationship_linking` → `completed`
 | Relationship linking | TBD | Inheritance + function call resolution |
 | **Total** | **~20m+ estimated** | |
 
-### Final Results (Docker FalkorDB, all optimizations)
+### Final Results (Docker FalkorDB, all optimizations, CALLS fix)
 
 | Phase | Time | Details |
 |-------|------|---------|
-| Filter + list | 6s | 6,429 code files (31% fewer after skipping non-code) |
-| Pre-scan imports | 26s | Build imports map for cross-file resolution |
-| Parse (tree-sitter) | 99s (1m 39s) | 15.4ms/file, 81,518 nodes extracted |
-| Node creation (CREATE) | 190s (3m 10s) | 81K nodes via batched CREATE + thread pool |
-| Directory hierarchy | 6s | Batch MERGE for directory tree |
-| Inheritance links | 2s | INHERITS edges |
-| **Total** | **328s (5m 28s)** | **Without CALLS edges** |
+| Parsing | ~2 min | 5,542 code files (vendor/minified/bower excluded) |
+| Node creation | ~5 min | 148,793 nodes via batched CREATE + thread pool |
+| Relationship linking | ~5 min | 28,229 CALLS + 1,506 INHERITS edges |
+| **Total** | **12m 16s (736s)** | **Full graph with CALLS** |
 
-**CALLS edges disabled** — the upstream call resolver generates 600K+ spurious edges via aggressive name-based matching (e.g., `get`, `render`, `init` matched across unrelated files). This is a bug in `_resolve_function_call`, not a performance issue. With CALLS enabled, indexing takes 1-3+ hours and may crash FalkorDB Lite.
+**Final graph**: 148,793 nodes (65K Variables, 38K Parameters, 27K Functions, 6.6K Files, 5K Modules, 4K Classes) + 211,503 edges (120K CONTAINS, 38K HAS_PARAMETER, 28K CALLS, 24K IMPORTS, 1.5K INHERITS).
+
+**CALLS fix**: The call resolver was generating 600K+ spurious edges by matching common names globally. Three fixes:
+1. Skip minified JS names (<=2 chars: `a`, `i`, `t`, etc.)
+2. Require imports for cross-file resolution (don't match just because a name exists somewhere)
+3. Skip vendor/minified/bundled files entirely (*.min.js, vendor/, bower/)
 
 Key finding: Variables (101K) and Parameters (55K) were 76% of all nodes but rarely queried. Dropping them cut actual DB writes from ~205K to ~81K nodes.
 
