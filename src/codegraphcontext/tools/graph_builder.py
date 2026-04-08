@@ -160,6 +160,7 @@ class GraphBuilder:
             '.pm': 'perl',
             '.ex': 'elixir',
             '.exs': 'elixir',
+            '.vue': 'javascript',  # Vue SFCs — extract <script> content
         }
         self._parsed_cache = {}
         self.create_schema()
@@ -492,6 +493,7 @@ class GraphBuilder:
         # Accumulators across all files
         file_nodes = []
         node_batches = {}   # label -> list of rows (each row includes path)
+        params_batch = []
         class_fn_batch = []
         nested_fn_batch = []
         js_imports = []
@@ -513,12 +515,11 @@ class GraphBuilder:
                 'relative_path': relative_path, 'is_dependency': is_dependency,
             })
 
-            # Collect code nodes — skip Variable and Parameter (76% of node count)
-            # for faster initial indexing. They can be added in a second pass.
             item_mappings = [
                 (file_data.get('functions', []),  'Function'),
                 (file_data.get('classes', []),    'Class'),
                 (file_data.get('traits', []),     'Trait'),
+                (file_data.get('variables', []),  'Variable'),
                 (file_data.get('interfaces', []), 'Interface'),
                 (file_data.get('macros', []),     'Macro'),
                 (file_data.get('structs', []),    'Struct'),
@@ -543,6 +544,13 @@ class GraphBuilder:
                     node_batches[label].append(row)
 
                     if label == 'Function':
+                        for arg_name in item.get('args', []):
+                            params_batch.append({
+                                'func_name': item['name'],
+                                'line_number': item['line_number'],
+                                'arg_name': arg_name,
+                                'file_path': file_path_str,
+                            })
                         if item.get('class_context'):
                             class_fn_batch.append({
                                 'class_name': item['class_context'],
@@ -628,6 +636,14 @@ class GraphBuilder:
                     MATCH (n:{label} {{name: row.name, path: row.file_path, line_number: row.line_number}})
                     {edge_op} (f)-[:CONTAINS]->(n)
                 """, edge_batch))
+
+        if params_batch:
+            tasks.append((f"""
+                UNWIND $batch AS row
+                MATCH (fn:Function {{name: row.func_name, path: row.file_path, line_number: row.line_number}})
+                {node_op} (p:Parameter {{name: row.arg_name, path: row.file_path, function_line_number: row.line_number}})
+                {edge_op} (fn)-[:HAS_PARAMETER]->(p)
+            """, params_batch))
 
         if class_fn_batch:
             tasks.append((f"""
@@ -1536,6 +1552,20 @@ class GraphBuilder:
         else:
             return {"deleted": True, "path": file_path_str}
 
+    @staticmethod
+    def _extract_vue_script(path: Path) -> Optional[str]:
+        """Extract <script> content from a Vue SFC for parsing as JavaScript/TypeScript."""
+        import re
+        try:
+            content = path.read_text(encoding='utf-8', errors='replace')
+            # Match <script> or <script lang="ts"> or <script setup>
+            match = re.search(r'<script[^>]*>(.*?)</script>', content, re.DOTALL)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+        return None
+
     def parse_file(self, repo_path: Path, path: Path, is_dependency: bool = False) -> Dict:
         """Parses a file with the appropriate language parser and extracts code elements."""
         parser = self.get_parser(path.suffix)
@@ -1546,20 +1576,31 @@ class GraphBuilder:
         debug_log(f"[parse_file] Starting parsing for: {path} with {parser.language_name} parser")
         try:
             index_source = (get_config_value("INDEX_SOURCE") or "false").lower() == "true"
-            if parser.language_name == 'python':
+
+            # Vue SFC: extract <script> block and parse as JS/TS
+            if path.suffix == '.vue':
+                script_content = self._extract_vue_script(path)
+                if not script_content or not script_content.strip():
+                    return {"path": str(path), "error": "No <script> block found in Vue SFC"}
+                # Write to a temp file for the parser (it expects a file path)
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, encoding='utf-8') as tmp:
+                    tmp.write(script_content)
+                    tmp_path = Path(tmp.name)
+                try:
+                    file_data = parser.parse(tmp_path, is_dependency, index_source=index_source)
+                    # Restore the original .vue path in the parsed data
+                    file_data['path'] = str(path)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+            elif parser.language_name == 'python':
                 is_notebook = path.suffix == '.ipynb'
                 file_data = parser.parse(
-                    path,
-                    is_dependency,
-                    is_notebook=is_notebook,
-                    index_source=index_source
+                    path, is_dependency, is_notebook=is_notebook, index_source=index_source
                 )
             else:
-                file_data = parser.parse(
-                    path,
-                    is_dependency,
-                    index_source=index_source
-                )
+                file_data = parser.parse(path, is_dependency, index_source=index_source)
+
             file_data['repo_path'] = str(repo_path)
             return file_data
         except Exception as e:
@@ -1845,43 +1886,36 @@ class GraphBuilder:
             supported_extensions = self.parsers.keys()
             all_files = path.rglob("*") if path.is_dir() else [path]
 
-            # Only index files with supported extensions — skip images, configs,
-            # binaries, etc. to reduce node count and indexing time significantly.
-            files = [f for f in all_files if f.is_file() and f.suffix in supported_extensions]
+            # All files for directory hierarchy; code files for parsing
+            all_file_list = [f for f in all_files if f.is_file()]
+            files = [f for f in all_file_list if f.suffix in supported_extensions]
 
-            # Filter default ignored directories
+            # Filter default ignored directories (apply to all files)
             ignore_dirs_str = get_config_value("IGNORE_DIRS") or ""
             if ignore_dirs_str and path.is_dir():
                 ignore_dirs = {d.strip().lower() for d in ignore_dirs_str.split(',') if d.strip()}
                 if ignore_dirs:
-                    kept_files = []
-                    for f in files:
+                    def _not_ignored(f):
                         try:
-                            # Check if any parent directory in the relative path is in ignore list
                             parts = set(p.lower() for p in f.relative_to(path).parent.parts)
-                            if not parts.intersection(ignore_dirs):
-                                kept_files.append(f)
-                            else:
-                                # debug_log(f"Skipping default ignored file: {f}")
-                                pass
+                            return not parts.intersection(ignore_dirs)
                         except ValueError:
-                             kept_files.append(f)
-                    files = kept_files
-            
+                            return True
+                    all_file_list = [f for f in all_file_list if _not_ignored(f)]
+                    files = [f for f in all_file_list if f.suffix in supported_extensions]
+
             if spec:
-                filtered_files = []
-                for f in files:
+                def _not_cgcignored(f):
                     try:
-                        # Match relative to the indexed project path.
-                        rel_path = f.relative_to(ignore_root).as_posix()
-                        if not spec.match_file(rel_path):
-                            filtered_files.append(f)
-                        else:
-                            debug_log(f"Ignored file based on .cgcignore: {rel_path}")
+                        return not spec.match_file(f.relative_to(ignore_root).as_posix())
                     except ValueError:
-                        # Should not happen if ignore_root is a parent, but safety fallback
-                        filtered_files.append(f)
-                files = filtered_files
+                        return True
+                all_file_list = [f for f in all_file_list if _not_cgcignored(f)]
+                files = [f for f in all_file_list if f.suffix in supported_extensions]
+
+            # Non-code files get minimal File nodes (batched, not individually)
+            non_code_files = [f for f in all_file_list if f.suffix not in supported_extensions]
+
             if job_id:
                 self.job_manager.update_job(job_id, total_files=len(files), phase="parsing")
 
@@ -1928,15 +1962,39 @@ class GraphBuilder:
             info_logger(f"Parsing complete: {len(all_file_data)} code files parsed. "
                        f"Writing all nodes to graph...")
 
-            # ── Phase 2: Write ALL nodes in bulk (~10 total DB queries) ──
+            # ── Phase 2: Write ALL nodes in bulk ──
             # For fresh indexing, use CREATE (no existence check) which is much
             # faster than MERGE. Safe because we checked the repo isn't already indexed.
             self.add_files_to_graph_batch(all_file_data, repo_name, imports_map, resolved_repo_path_str, use_create=True)
 
-            # Batch-create directory hierarchy now that all File nodes exist
-            self._create_directory_hierarchy_batch(files, path)
+            # Batch-create minimal File nodes for non-code files
+            if non_code_files:
+                non_code_batch = []
+                repo_path_obj = path.resolve()
+                for f in non_code_files:
+                    fp = str(f.resolve())
+                    try:
+                        rel = str(f.resolve().relative_to(repo_path_obj))
+                    except ValueError:
+                        rel = f.name
+                    non_code_batch.append({
+                        'path': fp, 'name': f.name,
+                        'relative_path': rel, 'is_dependency': is_dependency,
+                    })
+                with self.driver.session() as session:
+                    for i in range(0, len(non_code_batch), 5000):
+                        session.run("""
+                            UNWIND $batch AS row
+                            CREATE (f:File {path: row.path})
+                            SET f.name = row.name, f.relative_path = row.relative_path,
+                                f.is_dependency = row.is_dependency
+                        """, batch=non_code_batch[i:i + 5000])
+                info_logger(f"Created {len(non_code_batch)} minimal File nodes for non-code files.")
 
-            info_logger(f"File processing complete. {len(all_file_data)} files parsed. "
+            # Batch-create directory hierarchy for ALL files (code + non-code)
+            self._create_directory_hierarchy_batch(all_file_list, path)
+
+            info_logger(f"File processing complete. {len(all_file_data)} code files + {len(non_code_files)} non-code files. "
                        f"Starting post-processing phase (inheritance + function calls)...")
 
             if job_id:
