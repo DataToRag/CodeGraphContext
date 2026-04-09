@@ -63,11 +63,14 @@ class TreeSitterParser:
     def __init__(self, language_name: str):
         self.language_name = language_name
         self.ts_manager = get_tree_sitter_manager()
-        
-        # Get the language (cached) and create a new parser for this instance
-        self.language: Language = self.ts_manager.get_language_safe(language_name)
-        # In tree-sitter 0.25+, Parser takes language in constructor
-        self.parser = Parser(self.language)
+
+        # Vue/Svelte parsers extract script blocks and delegate to JS/TS.
+        # They don't need a dedicated tree-sitter parser.
+        self.language: Optional[Language] = None
+        self.parser: Optional[Parser] = None
+        if language_name not in ('vue', 'svelte'):
+            self.language = self.ts_manager.get_language_safe(language_name)
+            self.parser = Parser(self.language)
 
         self.language_specific_parser = None
         if self.language_name == 'python':
@@ -124,6 +127,12 @@ class TreeSitterParser:
         elif self.language_name == 'elixir':
             from .languages.elixir import ElixirTreeSitterParser
             self.language_specific_parser = ElixirTreeSitterParser(self)
+        elif self.language_name == 'vue':
+            from .languages.vue import VueTreeSitterParser
+            self.language_specific_parser = VueTreeSitterParser(self)
+        elif self.language_name == 'svelte':
+            from .languages.svelte import SvelteTreeSitterParser
+            self.language_specific_parser = SvelteTreeSitterParser(self)
 
 
 
@@ -173,7 +182,8 @@ class GraphBuilder:
             '.pm': 'perl',
             '.ex': 'elixir',
             '.exs': 'elixir',
-            '.vue': 'javascript',  # Vue SFCs — extract <script> content
+            '.vue': 'vue',
+            '.svelte': 'svelte',
         }
         self._parsed_cache = {}
         self.create_schema()
@@ -384,6 +394,12 @@ class GraphBuilder:
         if '.exs' in files_by_lang:
             from .languages import elixir as elixir_lang_module
             imports_map.update(elixir_lang_module.pre_scan_elixir(files_by_lang['.exs'], self.get_parser('.exs')))
+        if '.vue' in files_by_lang:
+            from .languages import vue as vue_lang_module
+            imports_map.update(vue_lang_module.pre_scan_vue(files_by_lang['.vue'], self.get_parser('.vue')))
+        if '.svelte' in files_by_lang:
+            from .languages import svelte as svelte_lang_module
+            imports_map.update(svelte_lang_module.pre_scan_svelte(files_by_lang['.svelte'], self.get_parser('.svelte')))
 
         return imports_map
 
@@ -1465,20 +1481,6 @@ class GraphBuilder:
         else:
             return {"deleted": True, "path": file_path_str}
 
-    @staticmethod
-    def _extract_vue_script(path: Path) -> Optional[str]:
-        """Extract <script> content from a Vue SFC for parsing as JavaScript/TypeScript."""
-        import re
-        try:
-            content = path.read_text(encoding='utf-8', errors='replace')
-            # Match <script> or <script lang="ts"> or <script setup>
-            match = re.search(r'<script[^>]*>(.*?)</script>', content, re.DOTALL)
-            if match:
-                return match.group(1)
-        except Exception:
-            pass
-        return None
-
     def parse_file(self, repo_path: Path, path: Path, is_dependency: bool = False) -> Dict:
         """Parses a file with the appropriate language parser and extracts code elements."""
         parser = self.get_parser(path.suffix)
@@ -1498,23 +1500,7 @@ class GraphBuilder:
         try:
             index_source = (get_config_value("INDEX_SOURCE") or "false").lower() == "true"
 
-            # Vue SFC: extract <script> block and parse as JS/TS
-            if path.suffix == '.vue':
-                script_content = self._extract_vue_script(path)
-                if not script_content or not script_content.strip():
-                    return {"path": str(path), "error": "No <script> block found in Vue SFC"}
-                # Write to a temp file for the parser (it expects a file path)
-                import tempfile
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, encoding='utf-8') as tmp:
-                    tmp.write(script_content)
-                    tmp_path = Path(tmp.name)
-                try:
-                    file_data = parser.parse(tmp_path, is_dependency, index_source=index_source)
-                    # Restore the original .vue path in the parsed data
-                    file_data['path'] = str(path)
-                finally:
-                    tmp_path.unlink(missing_ok=True)
-            elif parser.language_name == 'python':
+            if parser.language_name == 'python':
                 is_notebook = path.suffix == '.ipynb'
                 file_data = parser.parse(
                     path, is_dependency, is_notebook=is_notebook, index_source=index_source
