@@ -35,6 +35,7 @@ final class AppState: ObservableObject {
     }
 
     func stop() {
+        Task { await indexingManager.unwatchAll() }
         pythonManager.stopAll()
     }
 }

@@ -3,6 +3,7 @@
 This module implements the live file-watching functionality using the `watchdog` library.
 It observes directories for changes and triggers updates to the code graph.
 """
+import hashlib
 import threading
 from pathlib import Path
 import typing
@@ -38,10 +39,11 @@ class RepositoryEventHandler(FileSystemEventHandler):
         self.repo_path = repo_path
         self.debounce_interval = debounce_interval
         self.timers = {} # A dictionary to manage debounce timers for file paths.
-        
+
         # Caches for the repository's state.
         self.all_file_data = []
         self.imports_map = {}
+        self._content_hashes: dict[str, str] = {}  # path → SHA256 hex digest
         
         # Perform the initial scan and linking when the watcher is created.
         if perform_initial_scan:
@@ -105,12 +107,38 @@ class RepositoryEventHandler(FileSystemEventHandler):
                     self.imports_map[symbol] = []
                 self.imports_map[symbol].extend(paths)
 
+    def _file_hash(self, path: Path) -> str | None:
+        """Compute SHA256 of a file's contents. Returns None if unreadable."""
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, IOError):
+            return None
+
+    def _content_changed(self, path: Path) -> bool:
+        """Return True if the file's content hash differs from the cached value.
+        Always returns True for deleted files (hash will be None)."""
+        path_str = str(path.resolve())
+        new_hash = self._file_hash(path)
+        old_hash = self._content_hashes.get(path_str)
+
+        if new_hash is None:
+            # File deleted — remove from cache, report as changed
+            self._content_hashes.pop(path_str, None)
+            return True
+
+        if new_hash == old_hash:
+            return False
+
+        self._content_hashes[path_str] = new_hash
+        return True
+
     def _handle_modification(self, event_path_str: str):
         """
         Incremental update: only re-parse and re-link the changed file plus the files
         that previously called into it.  O(k) instead of O(n) for every event.
 
         Algorithm:
+          0. Check content hash — skip if file content hasn't actually changed.
           1. Query Neo4j for files that have CALLS/INHERITS touching the changed file
              (must happen BEFORE nodes are deleted, so the graph still has the old edges).
           2. Update self.imports_map for the changed file only (O(1) file scan).
@@ -124,8 +152,13 @@ class RepositoryEventHandler(FileSystemEventHandler):
           6. Build file_class_lookup cheaply from Neo4j (no full re-parse needed).
           7. Re-create CALLS/INHERITS for the subset only.
         """
-        info_logger(f"File change detected (incremental update): {event_path_str}")
+        # Step 0: Skip if content hasn't actually changed (e.g., touch, IDE metadata write).
         changed_path = Path(event_path_str)
+        if not self._content_changed(changed_path):
+            debug_log(f"[WATCHER] Content unchanged, skipping: {event_path_str}")
+            return
+
+        info_logger(f"File change detected (incremental update): {event_path_str}")
         changed_path_str = str(changed_path.resolve())
         supported_extensions = self.graph_builder.parsers.keys()
 

@@ -7,6 +7,7 @@ final class IndexingManager: ObservableObject {
     @Published var isIndexing = false
     @Published var indexingRepoName: String?
     @Published var indexedRepositories: [IndexedRepository] = []
+    @Published var watchedPaths: Set<String> = []
 
     private let logger = Logger(subsystem: "com.codegraphcontext.mac", category: "IndexingManager")
 
@@ -30,6 +31,9 @@ final class IndexingManager: ObservableObject {
             ])
             logger.info("Indexing complete for \(repoName)")
 
+            // Auto-watch the repo so the graph stays in sync as files change
+            await watchRepository(at: path)
+
             // Refresh the repository list
             await refreshRepositories()
         } catch {
@@ -38,6 +42,40 @@ final class IndexingManager: ObservableObject {
 
         isIndexing = false
         indexingRepoName = nil
+    }
+
+    // MARK: - File Watching
+
+    func watchRepository(at path: String) async {
+        do {
+            _ = try await callTool("watch_directory", arguments: ["path": path])
+            watchedPaths.insert(path)
+            logger.info("Auto-watching \(path) for changes")
+        } catch {
+            logger.error("Failed to watch \(path): \(error)")
+        }
+    }
+
+    func unwatchRepository(at path: String) async {
+        do {
+            _ = try await callTool("unwatch_directory", arguments: ["path": path])
+            watchedPaths.remove(path)
+            logger.info("Stopped watching \(path)")
+        } catch {
+            logger.error("Failed to unwatch \(path): \(error)")
+        }
+    }
+
+    func unwatchAll() async {
+        for path in watchedPaths {
+            do {
+                _ = try await callTool("unwatch_directory", arguments: ["path": path])
+                logger.info("Unwatched \(path) on shutdown")
+            } catch {
+                logger.warning("Failed to unwatch \(path) on shutdown: \(error)")
+            }
+        }
+        watchedPaths.removeAll()
     }
 
     // MARK: - List Repositories

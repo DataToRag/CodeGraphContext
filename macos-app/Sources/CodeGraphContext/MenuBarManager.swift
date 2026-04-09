@@ -82,10 +82,13 @@ struct MenuBarView: View {
                     .foregroundColor(.secondary)
             } else {
                 ForEach(appState.indexingManager.indexedRepositories) { repo in
-                    Button {
-                        // Could reveal in Finder or show details
-                    } label: {
+                    let isWatched = appState.indexingManager.watchedPaths.contains(repo.path)
+                    HStack {
                         Label(repo.name, systemImage: "folder")
+                        if isWatched {
+                            Image(systemName: "eye")
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }
