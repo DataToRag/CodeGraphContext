@@ -107,7 +107,7 @@ def calculate_cyclomatic_complexity(code_finder: CodeFinder, **args) -> Dict[str
 
 def find_most_complex_functions(code_finder: CodeFinder, **args) -> Dict[str, Any]:
     """Tool to find the most complex functions."""
-    limit = args.get("limit", 10)
+    limit = int(args.get("limit", 10))
     repo_path = args.get("repo_path")
     try:
         debug_log(f"Finding the top {limit} most complex functions. repo_path={repo_path}")

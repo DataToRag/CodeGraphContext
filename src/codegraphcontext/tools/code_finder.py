@@ -992,7 +992,7 @@ class CodeFinder:
                 results = self.find_module_dependencies(target, repo_path=repo_path)
                 return {
                     "query_type": "module_dependencies", "target": target, "results": results,
-                    "summary": f"Module '{target}' is imported by {len(results['imported_by_files'])} files"
+                    "summary": f"Module '{target}' is imported by {len(results.get('importers', []))} files"
                 }
             
             elif query_type in ["variable_scope", "var_scope", "variable_usage_scope"]:
