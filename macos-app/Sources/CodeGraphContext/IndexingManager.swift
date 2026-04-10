@@ -24,7 +24,47 @@ final class IndexingManager: ObservableObject {
 
     // MARK: - Index a Repository
 
+    /// Validate that a path is a git repository directory.
+    /// Returns an error message or nil if valid.
+    static func validateRepoPath(_ path: String) -> String? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+
+        guard fm.fileExists(atPath: path, isDirectory: &isDir) else {
+            return "Path does not exist: \(path)"
+        }
+        guard isDir.boolValue else {
+            return "Path is not a directory. Please select a project folder."
+        }
+
+        // Check for .git directory or git rev-parse
+        let gitDir = (path as NSString).appendingPathComponent(".git")
+        if fm.fileExists(atPath: gitDir) { return nil }
+
+        // Fallback: run git rev-parse (handles subdirectories of a git repo)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["rev-parse", "--git-dir"]
+        process.currentDirectoryURL = URL(fileURLWithPath: path)
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 { return nil }
+        } catch { /* fall through */ }
+
+        return "The selected directory is not a git repository. Please select a git project root."
+    }
+
     func indexRepository(at path: String) async {
+        // Validate before starting
+        if let error = Self.validateRepoPath(path) {
+            logger.error("Validation failed for \(path): \(error)")
+            addActivity("Index rejected: \(error)")
+            return
+        }
+
         let repoName = URL(fileURLWithPath: path).lastPathComponent
         isIndexing = true
         indexingRepoName = repoName

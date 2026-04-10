@@ -43,8 +43,17 @@ struct MenuBarView: View {
                 panel.prompt = "Index"
 
                 if panel.runModal() == .OK, let url = panel.url {
-                    Task { @MainActor in
-                        await appState.indexingManager.indexRepository(at: url.path)
+                    if let error = IndexingManager.validateRepoPath(url.path) {
+                        let alert = NSAlert()
+                        alert.messageText = "Cannot Index Directory"
+                        alert.informativeText = error
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                    } else {
+                        Task { @MainActor in
+                            await appState.indexingManager.indexRepository(at: url.path)
+                        }
                     }
                 }
 

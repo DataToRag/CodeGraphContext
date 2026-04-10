@@ -1,9 +1,23 @@
 from typing import Any, Dict
 from pathlib import Path
+import subprocess
 import threading
 import os
 from ...utils.debug_log import debug_log
 from ..package_resolver import get_local_package_path
+
+
+def _is_git_repo(path: Path) -> bool:
+    """Check if a path is inside a git repository."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=str(path), capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
 
 def add_code_to_graph(graph_builder, job_manager, list_repos_func, **args) -> Dict[str, Any]:
     """
@@ -12,15 +26,29 @@ def add_code_to_graph(graph_builder, job_manager, list_repos_func, **args) -> Di
     """
     path = args.get("path")
     is_dependency = args.get("is_dependency", False)
-    
+
     try:
         path_obj = Path(path).resolve()
 
         if not path_obj.exists():
             return {
-                "success": True,
+                "success": False,
                 "status": "path_not_found",
                 "message": f"Path '{path}' does not exist."
+            }
+
+        if not path_obj.is_dir():
+            return {
+                "success": False,
+                "status": "not_a_directory",
+                "message": f"Path '{path}' is not a directory. Please select a project directory."
+            }
+
+        if not is_dependency and not _is_git_repo(path_obj):
+            return {
+                "success": False,
+                "status": "not_a_git_repo",
+                "message": "The selected directory is not a git repository. Please select a git project root."
             }
 
         # Prevent re-indexing the same repository.
