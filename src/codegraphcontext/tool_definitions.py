@@ -28,10 +28,16 @@ TOOLS = {
     },
     "find_code": {
         "name": "find_code",
-        "description": "Find relevant code snippets related to a keyword (e.g., function name, class name, or content).",
+        "description": "Find relevant code snippets related to a keyword (e.g., function name, class name, or content). Returns compact summaries by default (name, path, line, signature). Set include_source=true for full source code.",
         "inputSchema": {
             "type": "object",
-            "properties": { "query": {"type": "string", "description": "Keyword or phrase to search for"}, "fuzzy_search": {"type": "boolean", "description": "Whether to use fuzzy search", "default": False}, "edit_distance": {"type": "number", "description": "Edit distance for fuzzy search (between 0-2)", "default": 2}, "repo_path": {"type": "string", "description": "Optional: Path to the repository to restrict the search to."}}, 
+            "properties": {
+                "query": {"type": "string", "description": "Keyword or phrase to search for"},
+                "fuzzy_search": {"type": "boolean", "description": "Whether to use fuzzy search", "default": False},
+                "edit_distance": {"type": "number", "description": "Edit distance for fuzzy search (between 0-2)", "default": 2},
+                "include_source": {"type": "boolean", "description": "Include full source code in results (default: false, returns compact summaries)", "default": False},
+                "repo_path": {"type": "string", "description": "Optional: Path to the repository to restrict the search to."}
+            },
             "required": ["query"]
         }
     },
@@ -82,11 +88,12 @@ TOOLS = {
     },
     "find_dead_code": {
         "name": "find_dead_code",
-        "description": "Find potentially unused functions (dead code) across the entire indexed codebase, optionally excluding functions with specific decorators.",
+        "description": "Find potentially unused functions (dead code) across the entire indexed codebase. Automatically excludes common false positives: test functions, framework-registered handlers (routes, CLI commands, Celery tasks), entry point files (conftest.py, setup.py, etc.), and functions with common framework decorators.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "exclude_decorated_with": {"type": "array", "items": {"type": "string"}, "description": "Optional: A list of decorator names (e.g., '@app.route') to exclude from dead code detection.", "default": []},
+                "exclude_decorated_with": {"type": "array", "items": {"type": "string"}, "description": "Additional decorator names to exclude (e.g., '@my_custom_decorator'). Common framework decorators are already excluded by default.", "default": []},
+                "include_all": {"type": "boolean", "description": "Bypass all false-positive filtering and return raw results.", "default": False},
                 "repo_path": {"type": "string", "description": "Optional: Path to the repository to restrict the search to."}
             }
         }
