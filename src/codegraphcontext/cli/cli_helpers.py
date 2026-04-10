@@ -376,7 +376,7 @@ import uvicorn
 import urllib.parse
 from ..viz.server import run_server, set_db_manager
 
-def visualize_helper(repo_path: Optional[str] = None, port: int = 47322, context: Optional[str] = None):
+def visualize_helper(repo_path: Optional[str] = None, port: int = 47322, context: Optional[str] = None, no_browser: bool = False):
     """"Generates an interactive visualization using the Playground UI."""
     # The viz server only needs a database connection for reading — skip full
     # service initialization (which creates a GraphBuilder that runs CREATE
@@ -449,15 +449,16 @@ def visualize_helper(repo_path: Optional[str] = None, port: int = 47322, context
     console.print(f"[green]Starting visualizer server on {backend_url}...[/green]")
     console.print(f"[cyan]Opening Playground UI:[/cyan] {visualization_url}")
     
-    # Open browser in a separate thread/process if possible, or just before starting server
-    def open_browser():
-        import time
-        import webbrowser
-        time.sleep(1.5) # Give the server a moment to start
-        webbrowser.open(visualization_url)
-    
-    import threading
-    threading.Thread(target=open_browser, daemon=True).start()
+    # Open browser unless suppressed (e.g., Mac app has its own WKWebView)
+    if not no_browser:
+        def open_browser():
+            import time
+            import webbrowser
+            time.sleep(1.5) # Give the server a moment to start
+            webbrowser.open(visualization_url)
+
+        import threading
+        threading.Thread(target=open_browser, daemon=True).start()
     
     try:
         run_server(host="127.0.0.1", port=port, static_dir=str(static_dir))

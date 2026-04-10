@@ -1110,13 +1110,14 @@ def delete(
 def visualize(
     repo: Optional[str] = typer.Option(None, "--repo", "-r", help="Path to the repository to visualize."),
     port: int = typer.Option(47322, "--port", "-p", help="Port to run the visualizer server on."),
-    context: Optional[str] = typer.Option(None, "--context", "-c", help="Specific context to use")
+    context: Optional[str] = typer.Option(None, "--context", "-c", help="Specific context to use"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Start server without opening browser."),
 ):
     """
     Launches the interactive UI to visualize the code graph.
     """
     _load_credentials()
-    visualize_helper(repo, port, context)
+    visualize_helper(repo, port, context, no_browser=no_browser)
 
 @app.command("list")
 def list_repositories(
