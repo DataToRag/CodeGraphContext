@@ -94,6 +94,7 @@ TOOLS = {
             "properties": {
                 "include_low_confidence": {"type": "boolean", "description": "Include medium and low confidence results (framework callbacks, interface overrides, class methods).", "default": False},
                 "include_all": {"type": "boolean", "description": "Return all uncalled functions with no filtering.", "default": False},
+                "limit": {"type": "integer", "description": "Max results to return (default 50).", "default": 50},
                 "repo_path": {"type": "string", "description": "Optional: Path to the repository to restrict the search to."}
             }
         }

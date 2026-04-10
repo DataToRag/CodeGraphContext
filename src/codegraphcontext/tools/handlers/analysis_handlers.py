@@ -152,6 +152,12 @@ def find_dead_code(code_finder: CodeFinder, **args) -> Dict[str, Any]:
         for f in raw:
             counts[f["confidence"]] = counts.get(f["confidence"], 0) + 1
 
+        total_filtered = len(filtered)
+        # Cap output to 50 results by default to keep responses manageable
+        limit = int(args.get("limit", 50))
+        if limit > 0:
+            filtered = filtered[:limit]
+
         return {
             "success": True,
             "query_type": "dead_code",
@@ -159,8 +165,10 @@ def find_dead_code(code_finder: CodeFinder, **args) -> Dict[str, Any]:
                 "potentially_unused_functions": filtered,
                 "confidence_breakdown": counts,
                 "total_uncalled": len(raw),
-                "note": "Only high-confidence results shown by default. "
-                        "Use include_low_confidence=true or include_all=true for more.",
+                "total_matching": total_filtered,
+                "showing": len(filtered),
+                "note": f"Showing {len(filtered)} of {total_filtered} matching functions. "
+                        "Use limit=N to see more, include_low_confidence=true for medium+low.",
             }
         }
     except Exception as e:

@@ -558,6 +558,9 @@ class CodeFinder:
                   AND NOT toLower(func.name) CONTAINS 'application'
                   AND NOT toLower(func.name) CONTAINS 'entry'
                   AND NOT toLower(func.name) CONTAINS 'entrypoint'
+                  AND NOT func.path CONTAINS '/tests/'
+                  AND NOT func.path CONTAINS '/test_'
+                  AND NOT func.path CONTAINS 'conftest.py'
                 WITH func
                 OPTIONAL MATCH (caller:Function)-[:CALLS]->(func)
                 WHERE caller.is_dependency = false {caller_ignore}
@@ -573,8 +576,11 @@ class CodeFinder:
                     func.decorators as decorators,
                     func.class_context as class_context,
                     file.name as file_name
-                ORDER BY func.path, func.line_number
-                LIMIT 200
+                ORDER BY
+                    CASE WHEN func.class_context IS NULL OR func.class_context = '' THEN 0 ELSE 1 END,
+                    CASE WHEN func.path ENDS WITH '.py' THEN 0 ELSE 1 END,
+                    func.path, func.line_number
+                LIMIT 1000
             """
 
             params = {}
