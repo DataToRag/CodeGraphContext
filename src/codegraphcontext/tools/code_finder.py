@@ -534,16 +534,19 @@ class CodeFinder:
             return result.data()
     
     def find_dead_code(self, exclude_decorated_with: Optional[List[str]] = None, repo_path: Optional[str] = None) -> Dict[str, Any]:
-        """Find potentially unused functions (not called by other functions in the project), optionally excluding those with specific decorators."""
+        """Find potentially unused functions (not called by other functions in the project).
+
+        Returns raw results with decorator and override info so the handler
+        can apply confidence scoring.
+        """
         if exclude_decorated_with is None:
             exclude_decorated_with = []
 
         with self.driver.session() as session:
             repo_filter = "AND func.path STARTS WITH $repo_path" if repo_path else ""
-            decorator_filter = "AND ALL(decorator_name IN $exclude_decorated_with WHERE NOT decorator_name IN func.decorators)" if exclude_decorated_with else ""
             func_ignore = cypher_path_not_under_ignore_dirs("func.path")
             caller_ignore = cypher_path_not_under_ignore_dirs("caller.path")
-            
+
             query = f"""
                 MATCH (func:Function)
                 WHERE func.is_dependency = false {repo_filter} {func_ignore}
@@ -555,7 +558,6 @@ class CodeFinder:
                   AND NOT toLower(func.name) CONTAINS 'application'
                   AND NOT toLower(func.name) CONTAINS 'entry'
                   AND NOT toLower(func.name) CONTAINS 'entrypoint'
-                  {decorator_filter}
                 WITH func
                 OPTIONAL MATCH (caller:Function)-[:CALLS]->(func)
                 WHERE caller.is_dependency = false {caller_ignore}
@@ -568,22 +570,40 @@ class CodeFinder:
                     func.line_number as line_number,
                     func.docstring as docstring,
                     func.context as context,
+                    func.decorators as decorators,
+                    func.class_context as class_context,
                     file.name as file_name
                 ORDER BY func.path, func.line_number
-                LIMIT 50
+                LIMIT 200
             """
-            
+
             params = {}
             if repo_path:
                 params["repo_path"] = repo_path
-            if exclude_decorated_with:
-                params["exclude_decorated_with"] = exclude_decorated_with
-                
+
             result = session.run(query, **params)
-            
+            raw = result.data()
+
+            # Check for interface overrides: methods that exist in both
+            # child and parent class (called by the framework, not user code)
+            override_names = set()
+            try:
+                override_result = session.run(f"""
+                    MATCH (child:Class)-[:INHERITS]->(parent:Class)
+                    MATCH (child)-[:CONTAINS]->(cm:Function)
+                    MATCH (parent)-[:CONTAINS]->(pm:Function)
+                    WHERE cm.name = pm.name
+                    {"AND cm.path STARTS WITH $repo_path" if repo_path else ""}
+                    RETURN DISTINCT cm.name AS name, cm.path AS path, cm.line_number AS line
+                """, **params)
+                for row in override_result.data():
+                    override_names.add((row["name"], row.get("path", ""), row.get("line", 0)))
+            except Exception:
+                pass  # non-critical
+
             return {
-                "potentially_unused_functions": result.data(),
-                "note": "These functions might be unused, but could be entry points, callbacks, or called dynamically"
+                "potentially_unused_functions": raw,
+                "override_methods": override_names,
             }
     
     def find_all_callers(self, function_name: str, path: Optional[str] = None, repo_path: Optional[str] = None) -> List[Dict]:

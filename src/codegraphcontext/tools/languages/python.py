@@ -216,7 +216,10 @@ class PythonTreeSitterParser:
                 params_node = func_node.child_by_field_name('parameters')
                 body_node = func_node.child_by_field_name('body')
                 
-                decorators = [self._get_node_text(child) for child in func_node.children if child.type == 'decorator']
+                # Decorators are children of decorated_definition (parent of function_definition),
+                # not children of function_definition itself.
+                decorator_parent = func_node.parent if func_node.parent and func_node.parent.type == 'decorated_definition' else func_node
+                decorators = [self._get_node_text(child) for child in decorator_parent.children if child.type == 'decorator']
 
                 context, context_type, _ = self._get_parent_context(func_node)
                 class_context, _, _ = self._get_parent_context(func_node, types=('class_definition',))

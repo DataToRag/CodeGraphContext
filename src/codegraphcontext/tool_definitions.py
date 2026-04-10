@@ -88,12 +88,12 @@ TOOLS = {
     },
     "find_dead_code": {
         "name": "find_dead_code",
-        "description": "Find potentially unused functions (dead code) across the entire indexed codebase. Automatically excludes common false positives: test functions, framework-registered handlers (routes, CLI commands, Celery tasks), entry point files (conftest.py, setup.py, etc.), and functions with common framework decorators.",
+        "description": "Find potentially unused functions (dead code) with confidence scoring. Returns only HIGH confidence results by default — functions with no callers, no framework decorators, no interface overrides, and not in test/config files. Use include_low_confidence=true for medium+low results.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "exclude_decorated_with": {"type": "array", "items": {"type": "string"}, "description": "Additional decorator names to exclude (e.g., '@my_custom_decorator'). Common framework decorators are already excluded by default.", "default": []},
-                "include_all": {"type": "boolean", "description": "Bypass all false-positive filtering and return raw results.", "default": False},
+                "include_low_confidence": {"type": "boolean", "description": "Include medium and low confidence results (framework callbacks, interface overrides, class methods).", "default": False},
+                "include_all": {"type": "boolean", "description": "Return all uncalled functions with no filtering.", "default": False},
                 "repo_path": {"type": "string", "description": "Optional: Path to the repository to restrict the search to."}
             }
         }

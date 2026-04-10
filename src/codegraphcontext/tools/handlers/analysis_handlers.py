@@ -1,82 +1,167 @@
+import re
 from typing import Any, Dict, List
 from ..code_finder import CodeFinder
 from ...utils.debug_log import debug_log
 
-# Framework decorators that register functions dynamically (routes, CLI commands, tasks, etc.)
-_DEFAULT_EXCLUDE_DECORATORS = [
-    # Flask / FastAPI / Django
-    "app.route", "router.get", "router.post", "router.put", "router.delete",
-    "api_view", "action", "login_required",
+# ── Dead code confidence scoring ──────────────────────────────────────────
+
+# Decorator substrings that indicate framework registration (not dead code).
+# Matched against the full decorator text (e.g., "@app.route('/foo')")
+_FRAMEWORK_DECORATOR_PATTERNS = [
+    # Web routes
+    "route", "api_view", "endpoint", "url_pattern",
     # Celery / task queues
     "task", "shared_task", "periodic_task",
-    # Click / Typer / argparse CLI
-    "cli.command", "command", "group",
-    # pytest / unittest
-    "fixture", "parametrize", "mark",
-    # Paver
-    "task",
-    # General registration
-    "register", "subscriber", "receiver", "hook", "listener",
-    "staticmethod", "classmethod", "property", "abstractmethod",
+    # CLI frameworks
+    "command", "group", "argument", "option",
+    # Pytest / unittest
+    "fixture", "parametrize",
+    # Signals / events
+    "receiver", "listens_for", "listener", "subscriber", "hook",
+    # Registration patterns
+    "register", "callback", "handler", "middleware",
+    # ORM / serialization
+    "validates", "pre_save", "post_save",
+    # Auth
+    "login_required", "auth_required", "permission",
+    # Abstract / interface
+    "abstractmethod",
 ]
 
-# File patterns where functions are expected to be "entry points" (not called statically)
+# File names where functions are expected to be entry points
 _ENTRY_POINT_FILES = {
     "conftest.py", "setup.py", "manage.py", "wsgi.py", "asgi.py",
+    "pavement.py", "fabfile.py", "tasks.py",
     "Gruntfile.js", "gulpfile.js", "webpack.config.js",
     "jest.config.js", "vite.config.ts", "vite.config.js",
+    "karma.conf.js",
 }
 
+# File path patterns for test/config files
+_ENTRY_POINT_PATH_PATTERNS = [
+    r"/conftest\.py$",
+    r"_test\.py$",
+    r"/test_[^/]+\.py$",
+    r"/tests/",
+    r"/migrations/",
+]
 
-def _filter_dead_code_results(results: List[Dict]) -> List[Dict]:
-    """Remove common false positives from dead code results."""
-    filtered = []
-    for r in results:
-        name = r.get("function_name", "")
-        path = r.get("path", "")
-        file_name = r.get("file_name", "")
 
-        # Skip test functions
-        if name.startswith("test_") or name.startswith("Test"):
+def _normalize_decorator(dec_text: str) -> str:
+    """Extract the core decorator name from full text like '@app.route(...)'."""
+    # Strip @ prefix
+    d = dec_text.lstrip("@").strip()
+    # Strip arguments: @app.route('/foo') → app.route
+    paren = d.find("(")
+    if paren != -1:
+        d = d[:paren]
+    return d.strip()
+
+
+def _has_framework_decorator(decorators: list) -> bool:
+    """Check if any decorator matches a framework registration pattern."""
+    for dec in decorators:
+        if not dec:
             continue
+        normalized = _normalize_decorator(dec).lower()
+        for pattern in _FRAMEWORK_DECORATOR_PATTERNS:
+            if pattern in normalized:
+                return True
+    return False
 
-        # Skip known entry point files
-        if file_name in _ENTRY_POINT_FILES:
-            continue
 
-        # Skip MCP tool handlers
-        if "/handlers/" in path and path.endswith("_handlers.py"):
-            continue
+def _score_dead_code(func: Dict, override_methods: set) -> str:
+    """Assign confidence: high, medium, or low.
 
-        filtered.append(r)
-    return filtered
+    high   = no decorators, no interface override, no convention match → likely truly dead
+    medium = has some indicator but ambiguous
+    low    = almost certainly a framework callback / interface impl → not dead
+    """
+    name = func.get("function_name", "")
+    path = func.get("path", "")
+    file_name = func.get("file_name", "")
+    decorators = func.get("decorators") or []
+    class_context = func.get("class_context") or ""
+    line = func.get("line_number", 0)
+
+    # LOW: framework decorator detected
+    if _has_framework_decorator(decorators):
+        return "low"
+
+    # LOW: interface override (method exists in parent class via INHERITS)
+    if (name, path, line) in override_methods:
+        return "low"
+
+    # LOW: known entry point files
+    if file_name in _ENTRY_POINT_FILES:
+        return "low"
+
+    # LOW: test files
+    for pat in _ENTRY_POINT_PATH_PATTERNS:
+        if re.search(pat, path):
+            return "low"
+
+    # LOW: handler files (MCP, API, etc.)
+    if "/handlers/" in path:
+        return "low"
+
+    # MEDIUM: has decorators (could be custom framework)
+    non_empty = [d for d in decorators if d and d != ""]
+    if non_empty:
+        return "medium"
+
+    # MEDIUM: is a class method (could be interface impl we couldn't detect)
+    if class_context:
+        return "medium"
+
+    # HIGH: standalone function, no decorators, no class, no special file
+    return "high"
 
 
 def find_dead_code(code_finder: CodeFinder, **args) -> Dict[str, Any]:
     """Tool to find potentially dead code across the entire project."""
-    exclude_decorated_with = args.get("exclude_decorated_with", [])
     include_all = args.get("include_all", False)
+    include_low_confidence = args.get("include_low_confidence", False)
     repo_path = args.get("repo_path")
-
-    # Merge user exclusions with defaults
-    all_exclusions = list(set(_DEFAULT_EXCLUDE_DECORATORS + exclude_decorated_with))
 
     try:
         debug_log(f"Finding dead code. repo_path={repo_path}, include_all={include_all}")
-        results = code_finder.find_dead_code(exclude_decorated_with=all_exclusions, repo_path=repo_path)
+        results = code_finder.find_dead_code(repo_path=repo_path)
 
-        # Filter common false positives unless include_all is set
-        if not include_all:
-            raw_count = len(results.get("potentially_unused_functions", []))
-            results["potentially_unused_functions"] = _filter_dead_code_results(
-                results.get("potentially_unused_functions", [])
-            )
-            results["filtered_count"] = raw_count - len(results["potentially_unused_functions"])
+        raw = results.get("potentially_unused_functions", [])
+        override_methods = results.get("override_methods", set())
+
+        # Score each result
+        for func in raw:
+            func["confidence"] = _score_dead_code(func, override_methods)
+
+        if include_all:
+            filtered = raw
+        elif include_low_confidence:
+            filtered = [f for f in raw if f["confidence"] in ("high", "medium", "low")]
+        else:
+            # Default: only high confidence
+            filtered = [f for f in raw if f["confidence"] == "high"]
+
+        # Remove internal fields from output
+        for f in filtered:
+            f.pop("decorators", None)
+            f.pop("class_context", None)
+
+        counts = {"high": 0, "medium": 0, "low": 0}
+        for f in raw:
+            counts[f["confidence"]] = counts.get(f["confidence"], 0) + 1
 
         return {
             "success": True,
             "query_type": "dead_code",
-            "results": results
+            "results": {
+                "potentially_unused_functions": filtered,
+                "confidence_breakdown": counts,
+                "total_uncalled": len(raw),
+                "note": "Only high-confidence results shown by default. "
+                        "Use include_low_confidence=true or include_all=true for more.",
+            }
         }
     except Exception as e:
         debug_log(f"Error finding dead code: {str(e)}")
