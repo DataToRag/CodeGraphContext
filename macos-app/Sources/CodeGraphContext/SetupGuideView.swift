@@ -8,7 +8,8 @@ struct SetupGuideView: View {
     @State private var indexPath: String?
     @State private var indexStats: String?
     @State private var isIndexing = false
-    @State private var copied = false
+    @State private var pluginInstalled = false
+    @State private var pluginError: String?
 
     private let totalSteps = 4
 
@@ -69,35 +70,49 @@ struct SetupGuideView: View {
     // MARK: - Step 1: Plugin
 
     private var pluginStep: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(spacing: 16) {
             Text("Connect to Claude Code")
                 .font(.title2.bold())
-                .frame(maxWidth: .infinity, alignment: .center)
 
             Text("Install the plugin so Claude Code can use the graph tools.")
                 .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .center)
 
             Spacer()
 
-            Group {
-                Text("Option A: Plugin install")
-                    .font(.headline)
-                copiableCode("claude plugin install codegraphcontext")
+            if pluginInstalled {
+                VStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 32))
+                        .foregroundColor(.green)
+                    Text("Plugin installed")
+                        .font(.headline)
+                    Text("Restart Claude Code to activate.")
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                VStack(spacing: 12) {
+                    Button("Install Plugin") {
+                        installPlugin()
+                    }
+                    .controlSize(.large)
 
-                Text("Option B: Manual config")
-                    .font(.headline)
-                    .padding(.top, 8)
-                Text("Add to your project's .mcp.json:")
-                    .foregroundColor(.secondary)
-                copiableCode("""
-                {"mcpServers":{"codegraphcontext":{"type":"http","url":"http://localhost:47321/mcp"}}}
-                """)
+                    if let error = pluginError {
+                        Text(error)
+                            .foregroundColor(.red)
+                            .font(.caption)
+                    }
+
+                    Text("Or install manually:")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                        .padding(.top, 8)
+                    copiableCode("claude plugin install codegraphcontext")
+                }
             }
 
             Spacer()
 
-            navButtons(backLabel: "Back", nextLabel: "Next")
+            navButtons(backLabel: "Back", nextLabel: pluginInstalled ? "Next" : "Skip")
         }
     }
 
@@ -254,6 +269,83 @@ struct SetupGuideView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(nextDisabled)
         }
+    }
+
+    // MARK: - Plugin Installation
+
+    private func installPlugin() {
+        pluginError = nil
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+
+        // 1. Find the plugin source (bundled or dev)
+        let devSource = "\(home)/git/CodeGraphContext/claude-plugin"
+        let bundledSource = Bundle.main.resourceURL?.appendingPathComponent("claude-plugin").path
+
+        guard let source = [bundledSource, devSource].compactMap({ $0 }).first(where: { fm.fileExists(atPath: $0) }) else {
+            pluginError = "Plugin source not found. Clone the CodeGraphContext repo first."
+            return
+        }
+
+        // 2. Copy to Claude plugins cache
+        let cacheDir = "\(home)/.claude/plugins/cache/DataToRag/codegraphcontext/1.0.0"
+        do {
+            if fm.fileExists(atPath: cacheDir) {
+                try fm.removeItem(atPath: cacheDir)
+            }
+            try fm.createDirectory(atPath: cacheDir, withIntermediateDirectories: true)
+
+            // Copy .claude-plugin/
+            let pluginDir = "\(source)/.claude-plugin"
+            if fm.fileExists(atPath: pluginDir) {
+                try fm.copyItem(atPath: pluginDir, toPath: "\(cacheDir)/.claude-plugin")
+            }
+
+            // Copy skills/
+            let skillsDir = "\(source)/skills"
+            if fm.fileExists(atPath: skillsDir) {
+                try fm.copyItem(atPath: skillsDir, toPath: "\(cacheDir)/skills")
+            }
+
+            // Copy README
+            let readme = "\(source)/README.md"
+            if fm.fileExists(atPath: readme) {
+                try fm.copyItem(atPath: readme, toPath: "\(cacheDir)/README.md")
+            }
+        } catch {
+            pluginError = "Failed to copy plugin: \(error.localizedDescription)"
+            return
+        }
+
+        // 3. Register in installed_plugins.json
+        let installedPath = "\(home)/.claude/plugins/installed_plugins.json"
+        do {
+            var root: [String: Any] = ["version": 2, "plugins": [String: Any]()]
+            if let data = fm.contents(atPath: installedPath),
+               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                root = json
+            }
+
+            var plugins = root["plugins"] as? [String: Any] ?? [:]
+            let key = "codegraphcontext@DataToRag"
+            let now = ISO8601DateFormatter().string(from: Date())
+            plugins[key] = [[
+                "scope": "user",
+                "installPath": cacheDir,
+                "version": "1.0.0",
+                "installedAt": now,
+                "lastUpdated": now,
+            ]]
+            root["plugins"] = plugins
+
+            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: URL(fileURLWithPath: installedPath))
+        } catch {
+            pluginError = "Plugin copied but failed to register: \(error.localizedDescription)"
+            return
+        }
+
+        pluginInstalled = true
     }
 
     // MARK: - Actions
