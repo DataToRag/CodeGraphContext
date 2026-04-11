@@ -109,21 +109,22 @@ struct MenuBarView: View {
 
     // MARK: - Plugin Status
 
-    @ViewBuilder
     private var pluginStatusItem: some View {
-        if Self.isPluginInstalled() {
-            Text("\u{2705} Plugin Installed")
-        } else {
-            Button("\u{26A0}\u{FE0F} Plugin Not Installed \u{2014} Setup Guide...") {
+        // Compute fresh on each menu render
+        let installed = Self.isPluginInstalled()
+        return Button(installed
+            ? "\u{2705} Claude Code Plugin"
+            : "\u{26A0}\u{FE0F} Plugin Not Installed \u{2014} Install..."
+        ) {
+            if !installed {
                 NSApp.setActivationPolicy(.regular)
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "setup-guide")
             }
         }
+        .disabled(installed)
     }
 
-    /// Check ~/.claude/plugins/installed_plugins.json for codegraphcontext.
-    /// Re-evaluated every time the menu view body is rendered (i.e., each menu open).
     private static func isPluginInstalled() -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let path = "\(home)/.claude/plugins/installed_plugins.json"
