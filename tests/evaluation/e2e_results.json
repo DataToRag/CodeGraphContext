@@ -310,5 +310,265 @@
         "max_score": 21
       }
     }
+  },
+  "llm_judge_verdicts": [
+    {
+      "question": "Where is authenticate() defined?",
+      "category": "simple",
+      "score_baseline": 3,
+      "score_cgc": 3,
+      "reasoning_baseline": "Correctly identifies authenticate() at the exact file and line number matching ground truth, and additionally surfaces the related authenticate_v3_api_token function for extra context.",
+      "reasoning_cgc": "Correctly identifies authenticate() at the exact file and line number matching ground truth, with structured metadata including the function signature.",
+      "winner": "tie",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "What does build_items_response() do?",
+      "category": "simple",
+      "score_baseline": 2,
+      "score_cgc": 2,
+      "reasoning_baseline": "Comprehensively lists dozens of files across api_internal and api_public controllers where the method is defined, clearly demonstrating the ground truth that it exists in multiple controller classes, but doesn't show what the code actually does.",
+      "reasoning_cgc": "Shows actual source code of 2 implementations revealing the method transforms and reformats item fields for API responses, directly answering 'what does it do', but only covers 2 of many implementations.",
+      "winner": "cgc",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Find all files that import 'flask'",
+      "category": "simple",
+      "score_baseline": 3,
+      "score_cgc": 1,
+      "reasoning_baseline": "Correctly finds numerous files importing the flask package with both 'import flask' and 'from flask import' styles, primarily in the webapp/ directory as expected by the ground truth.",
+      "reasoning_cgc": "Returns files importing internal modules with 'flask' in the name (flask_context, init_flask_app) rather than actual flask package imports, and misses the webapp/ directory entirely.",
+      "winner": "baseline",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "What classes inherit from BaseSchema?",
+      "category": "simple",
+      "score_baseline": 1,
+      "score_cgc": 0,
+      "reasoning_baseline": "Found classes containing 'BaseSchema' in their name but none of the results actually show classes inheriting FROM BaseSchema \u2014 KnowledgeBaseSchema inherits GenericSchema, ReponseBaseSchema inherits Schema \u2014 so it missed the actual direct subclasses in webapp/schemas/.",
+      "reasoning_cgc": "Returns zero children, zero parents, and zero methods for BaseSchema, which is completely wrong given the ground truth that BaseSchema has many direct subclasses.",
+      "winner": "baseline",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Find all functions starting with 'test_'",
+      "category": "simple",
+      "score_baseline": 2,
+      "score_cgc": 2,
+      "reasoning_baseline": "Provides a count of 4930 which is reasonably close to the ground truth of ~5000+, but only gives a count rather than listing the actual functions.",
+      "reasoning_cgc": "Provides a count of 4904 which is reasonably close to the ground truth of ~5000+, but only gives a count rather than listing the actual functions.",
+      "winner": "tie",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "What are the parameters of authenticate()?",
+      "category": "simple",
+      "score_baseline": 3,
+      "score_cgc": 0,
+      "reasoning_baseline": "Directly shows the function signature `authenticate(email, password)` matching the ground truth exactly, plus a related function.",
+      "reasoning_cgc": "Empty result provides no information about the parameters of authenticate().",
+      "winner": "baseline",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Find all TODO/FIXME comments",
+      "category": "simple",
+      "score_baseline": 3,
+      "score_cgc": 0,
+      "reasoning_baseline": "Provides a specific count of 3788 TODO/FIXME comments, which aligns with the ground truth of thousands and directly answers the question.",
+      "reasoning_cgc": "Correctly identifies a limitation but fails to provide any useful answer to the question.",
+      "winner": "baseline",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "What decorators are used on LoginPageController?",
+      "category": "simple",
+      "score_baseline": 1,
+      "score_cgc": 2,
+      "reasoning_baseline": "Only shows the class definition line location via grep but does not reveal the lines preceding the class where decorators would appear, providing no decorator information.",
+      "reasoning_cgc": "Shows the full extracted class source starting at the class definition line, which implicitly suggests no decorators are present (since many extraction tools include decorators as part of the class), but doesn't explicitly show the lines above line 16 to definitively confirm.",
+      "winner": "cgc",
+      "blinded_as": "A=baseline,B=cgc"
+    },
+    {
+      "question": "Who calls authenticate() and from where?",
+      "category": "structural",
+      "score_baseline": 3,
+      "score_cgc": 0,
+      "reasoning_baseline": "Found all five ground truth caller files (access_token.py, change_password.py, change_email.py, confirm_password.py, unlock_account.py) plus an additional valid caller (login.py), with exact file paths and line numbers.",
+      "reasoning_cgc": "Returned zero results, completely failing to find any callers of authenticate().",
+      "winner": "baseline",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Full call chain from authenticate to its callees",
+      "category": "structural",
+      "score_baseline": 1,
+      "score_cgc": 0,
+      "reasoning_baseline": "Locates the authenticate function definitions but does not trace the call chain into by_email, password hashing, or account validation as required.",
+      "reasoning_cgc": "Returns zero results, providing no useful information about the authenticate function or its callees.",
+      "winner": "baseline",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "If I change UserSchema, what code would be affected?",
+      "category": "structural",
+      "score_baseline": 3,
+      "score_cgc": 0,
+      "reasoning_baseline": "Provides comprehensive file-level and line-level references showing all imports, definitions, and usages of UserSchema across controllers, schemas, and other modules, directly answering what code would be affected.",
+      "reasoning_cgc": "Returns zero results claiming no functions call UserSchema, which is factually incorrect and provides no useful information to the developer.",
+      "winner": "baseline",
+      "blinded_as": "A=baseline,B=cgc"
+    },
+    {
+      "question": "Which modules have the highest fan-out?",
+      "category": "structural",
+      "score_baseline": 1,
+      "score_cgc": 0,
+      "reasoning_baseline": "Correctly identifies that computing cross-module call counts requires call graph analysis beyond simple grep, showing understanding of the problem even though it provides no concrete answer.",
+      "reasoning_cgc": "Returns an empty array with no useful information about module fan-out.",
+      "winner": "baseline",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Dependency graph of the services/ directory",
+      "category": "structural",
+      "score_baseline": 1,
+      "score_cgc": 0,
+      "reasoning_baseline": "Identifies 599 service files with imports, which is a starting point but does not actually map out which service modules depend on which other service modules.",
+      "reasoning_cgc": "An empty array provides no information whatsoever about the dependency graph of the services/ directory.",
+      "winner": "baseline",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Functions called from 3+ different modules",
+      "category": "structural",
+      "score_baseline": 0,
+      "score_cgc": 3,
+      "reasoning_baseline": "Refuses to answer by claiming the task is impossible with grep, providing no useful results.",
+      "reasoning_cgc": "Provides a comprehensive ranked list of functions called from 3+ modules with exact caller counts, directly and accurately answering the question.",
+      "winner": "cgc",
+      "blinded_as": "A=baseline,B=cgc"
+    },
+    {
+      "question": "Shared utilities used across all controllers",
+      "category": "structural",
+      "score_baseline": 0,
+      "score_cgc": 0,
+      "reasoning_baseline": "Provides no answer, only states the tool cannot perform the analysis, which is unhelpful.",
+      "reasoning_cgc": "Returns an empty array, incorrectly implying no shared utilities exist when the ground truth confirms they do.",
+      "winner": "tie",
+      "blinded_as": "A=baseline,B=cgc"
+    },
+    {
+      "question": "Map the inheritance hierarchy for Schema classes",
+      "category": "structural",
+      "score_baseline": 2,
+      "score_cgc": 1,
+      "reasoning_baseline": "Shows actual Schema classes (DealCuratorFeeSchema, ArticleFormatSchema, BasePixelSchema, etc.) with their parent classes (NtvSchema, GenericSchema, BasePixelSchema), directly mapping the inheritance hierarchy, though the output is raw grep and truncated.",
+      "reasoning_cgc": "Provides structured parent\u2192child JSON edges but focuses predominantly on test case class hierarchies (BaseAdSchemaTestCase, BaseAdvertiserSchemaTestCase) rather than the actual Schema domain classes, largely missing the core schema inheritance hierarchy the question asks about.",
+      "winner": "baseline",
+      "blinded_as": "A=baseline,B=cgc"
+    },
+    {
+      "question": "What are the most coupled module pairs?",
+      "category": "structural",
+      "score_baseline": 0,
+      "score_cgc": 3,
+      "reasoning_baseline": "Fails to provide any answer, simply stating the tool cannot compute the metric, which is not useful to the developer.",
+      "reasoning_cgc": "Provides a ranked list of the top 10 most coupled module pairs with specific cross-module call counts, with the top pairs showing hundreds of calls, directly matching the ground truth.",
+      "winner": "cgc",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Who calls hash_password and what does it call?",
+      "category": "structural",
+      "score_baseline": 2,
+      "score_cgc": 1,
+      "reasoning_baseline": "Comprehensively identifies all callers of hash_password across the codebase but does not show what hash_password itself calls internally (missing the callees direction).",
+      "reasoning_cgc": "Only found 1 of many callers (missing actions.py, utils.py, queries.py callers) and reported 0 callees, making it significantly incomplete on both directions of the question.",
+      "winner": "baseline",
+      "blinded_as": "A=baseline,B=cgc"
+    },
+    {
+      "question": "Find all dead code (unused functions)",
+      "category": "graph-only",
+      "score_baseline": 0,
+      "score_cgc": 2,
+      "reasoning_baseline": "Produces no results at all, merely stating the task would require hours of grep across ~27K functions without attempting any analysis.",
+      "reasoning_cgc": "Provides concrete dead code candidates with paths and line numbers, though likely includes false positives like framework-registered handlers (oauth_callback, get_flask_app) and may only cover a subset of the 5,500+ file codebase.",
+      "winner": "cgc",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Find circular import dependencies",
+      "category": "graph-only",
+      "score_baseline": 1,
+      "score_cgc": 0,
+      "reasoning_baseline": "Correctly identifies that circular import detection requires graph cycle detection beyond simple grep, but fails to provide any actual results or attempt the analysis.",
+      "reasoning_cgc": "Returns an empty array implying no circular imports exist, which is almost certainly incorrect for a 5,500+ file codebase and provides no evidence or methodology.",
+      "winner": "baseline",
+      "blinded_as": "A=baseline,B=cgc"
+    },
+    {
+      "question": "What is the most coupled module pair?",
+      "category": "graph-only",
+      "score_baseline": 0,
+      "score_cgc": 2,
+      "reasoning_baseline": "Provided no answer at all, merely stating the tool limitation without attempting an alternative approach.",
+      "reasoning_cgc": "Provided a specific module pair with a call count that directly answers the question, though correctness of the exact pair and count cannot be fully verified against ground truth.",
+      "winner": "cgc",
+      "blinded_as": "A=baseline,B=cgc"
+    },
+    {
+      "question": "Functions with highest cyclomatic complexity",
+      "category": "graph-only",
+      "score_baseline": 0,
+      "score_cgc": 3,
+      "reasoning_baseline": "Failed to produce any results or useful answer, acknowledging inability to compute cyclomatic complexity.",
+      "reasoning_cgc": "Provides a ranked list of functions with specific cyclomatic complexity values, file paths, and line numbers, directly answering the question.",
+      "winner": "cgc",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Blast radius of removing the 'queries' module",
+      "category": "graph-only",
+      "score_baseline": 0,
+      "score_cgc": 2,
+      "reasoning_baseline": "Fails to provide any useful answer, merely stating that grep cannot compute transitive dependents without attempting an alternative approach.",
+      "reasoning_cgc": "Provides concrete transitive impact numbers (462 functions, 169 files) which aligns with the ground truth requirement of traversing CALLS edges, though exact accuracy cannot be verified.",
+      "winner": "cgc",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Find code paths between create_app and authenticate",
+      "category": "graph-only",
+      "score_baseline": 0,
+      "score_cgc": 1,
+      "reasoning_baseline": "Simply states a limitation without providing any useful information or alternative approach to answer the question.",
+      "reasoning_cgc": "Provides actionable guidance on the correct query format to find the call chain, but does not actually return any code paths.",
+      "winner": "cgc",
+      "blinded_as": "A=cgc,B=baseline"
+    },
+    {
+      "question": "Identify loosely-coupled services (extraction candidates)",
+      "category": "graph-only",
+      "score_baseline": 0,
+      "score_cgc": 2,
+      "reasoning_baseline": "Provides no useful answer, simply stating the tool cannot compute coupling ratios.",
+      "reasoning_cgc": "Identifies concrete service candidates with low external call counts matching the ground truth criteria, though the duplicate 'services' entry and uniformly identical counts suggest potential inaccuracy.",
+      "winner": "cgc",
+      "blinded_as": "A=baseline,B=cgc"
+    }
+  ],
+  "llm_judge_summary": {
+    "total_baseline": 32,
+    "total_cgc": 30,
+    "max_score": 75,
+    "cgc_wins": 10,
+    "baseline_wins": 12,
+    "ties": 3
   }
 }
