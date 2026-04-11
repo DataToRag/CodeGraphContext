@@ -7,6 +7,7 @@ struct MenuBarView: View {
 
     var body: some View {
         servicesSection
+        pluginStatusItem
 
         Divider()
 
@@ -104,6 +105,34 @@ struct MenuBarView: View {
         let dot = isRunning ? "\u{1F7E2}" : "\u{1F534}"
         let status = isRunning ? "Running on :\(port)" : "Stopped"
         return Text("\(dot) \(name) \u{2014} \(status)")
+    }
+
+    // MARK: - Plugin Status
+
+    @ViewBuilder
+    private var pluginStatusItem: some View {
+        if Self.isPluginInstalled() {
+            Text("\u{2705} Plugin Installed")
+        } else {
+            Button("\u{26A0}\u{FE0F} Plugin Not Installed \u{2014} Setup Guide...") {
+                NSApp.setActivationPolicy(.regular)
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "setup-guide")
+            }
+        }
+    }
+
+    /// Check ~/.claude/plugins/installed_plugins.json for codegraphcontext.
+    /// Re-evaluated every time the menu view body is rendered (i.e., each menu open).
+    private static func isPluginInstalled() -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = "\(home)/.claude/plugins/installed_plugins.json"
+        guard let data = FileManager.default.contents(atPath: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let plugins = json["plugins"] as? [String: Any] else {
+            return false
+        }
+        return plugins.keys.contains { $0.contains("codegraphcontext") }
     }
 
     // MARK: - Repositories
