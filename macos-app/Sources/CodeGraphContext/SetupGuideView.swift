@@ -96,17 +96,21 @@ struct SetupGuideView: View {
                     }
                     .controlSize(.large)
 
+                    Text("Installs MCP config + skills into Claude Code.")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+
                     if let error = pluginError {
                         Text(error)
                             .foregroundColor(.red)
                             .font(.caption)
                     }
 
-                    Text("Or install manually:")
+                    Text("Or add manually to your project's .mcp.json:")
                         .foregroundColor(.secondary)
                         .font(.caption)
                         .padding(.top, 8)
-                    copiableCode("claude plugin install codegraphcontext")
+                    copiableCode(#"{"mcpServers":{"codegraphcontext":{"type":"http","url":"http://localhost:47321/mcp"}}}"#)
                 }
             }
 
