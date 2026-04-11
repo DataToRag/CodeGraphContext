@@ -38,11 +38,10 @@ struct MenuBarView: View {
         statusSection
         Divider()
 
-        Button("Quit") {
+        Button("Quit CodeGraphContext") {
             appState.stop()
             NSApplication.shared.terminate(nil)
         }
-        .keyboardShortcut("q", modifiers: [.command])
     }
 
     // MARK: - Repositories
@@ -115,7 +114,6 @@ struct MenuBarView: View {
             Button("Reindex") {
                 Task { @MainActor in await im.indexRepository(at: repo.path) }
             }
-            .disabled(im.isIndexing)
 
             if isWatched {
                 Button("Stop Watching") {

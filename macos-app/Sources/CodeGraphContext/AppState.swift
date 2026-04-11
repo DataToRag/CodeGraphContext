@@ -40,7 +40,8 @@ final class AppState: ObservableObject {
     }
 
     func stop() {
-        Task { await indexingManager.unwatchAll() }
+        // Don't await — just fire and forget so Quit never hangs
+        indexingManager.watchedPaths.removeAll()
         pythonManager.stopAll()
     }
 
