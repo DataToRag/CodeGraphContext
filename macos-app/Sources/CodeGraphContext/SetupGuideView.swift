@@ -278,14 +278,12 @@ struct SetupGuideView: View {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser.path
 
-        // 1. Find the plugin source (bundled or dev)
-        let devSource = "\(home)/git/CodeGraphContext/claude-plugin"
-        let bundledSource = Bundle.main.resourceURL?.appendingPathComponent("claude-plugin").path
-
-        guard let source = [bundledSource, devSource].compactMap({ $0 }).first(where: { fm.fileExists(atPath: $0) }) else {
-            pluginError = "Plugin source not found. Clone the CodeGraphContext repo first."
+        // 1. Find plugin source from app bundle (SPM resources are in Bundle.module)
+        guard let bundled = Bundle.module.url(forResource: "claude-plugin", withExtension: nil) else {
+            pluginError = "Plugin resources not found in app bundle."
             return
         }
+        let source = bundled.path
 
         // 2. Copy to Claude plugins cache
         let cacheDir = "\(home)/.claude/plugins/cache/DataToRag/codegraphcontext/1.0.0"
@@ -295,22 +293,12 @@ struct SetupGuideView: View {
             }
             try fm.createDirectory(atPath: cacheDir, withIntermediateDirectories: true)
 
-            // Copy .claude-plugin/
-            let pluginDir = "\(source)/.claude-plugin"
-            if fm.fileExists(atPath: pluginDir) {
-                try fm.copyItem(atPath: pluginDir, toPath: "\(cacheDir)/.claude-plugin")
-            }
-
-            // Copy skills/
-            let skillsDir = "\(source)/skills"
-            if fm.fileExists(atPath: skillsDir) {
-                try fm.copyItem(atPath: skillsDir, toPath: "\(cacheDir)/skills")
-            }
-
-            // Copy README
-            let readme = "\(source)/README.md"
-            if fm.fileExists(atPath: readme) {
-                try fm.copyItem(atPath: readme, toPath: "\(cacheDir)/README.md")
+            for item in [".claude-plugin", "skills", "README.md"] {
+                let src = "\(source)/\(item)"
+                let dst = "\(cacheDir)/\(item)"
+                if fm.fileExists(atPath: src) {
+                    try fm.copyItem(atPath: src, toPath: dst)
+                }
             }
         } catch {
             pluginError = "Failed to copy plugin: \(error.localizedDescription)"
@@ -320,6 +308,10 @@ struct SetupGuideView: View {
         // 3. Register in installed_plugins.json
         let installedPath = "\(home)/.claude/plugins/installed_plugins.json"
         do {
+            // Ensure ~/.claude/plugins/ exists
+            let pluginsDir = "\(home)/.claude/plugins"
+            try fm.createDirectory(atPath: pluginsDir, withIntermediateDirectories: true)
+
             var root: [String: Any] = ["version": 2, "plugins": [String: Any]()]
             if let data = fm.contents(atPath: installedPath),
                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {

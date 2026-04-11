@@ -8,7 +8,10 @@ let package = Package(
         .executableTarget(
             name: "CodeGraphContext",
             path: "Sources/CodeGraphContext",
-            exclude: ["Info.plist"]
+            exclude: ["Info.plist"],
+            resources: [
+                .copy("Resources/claude-plugin"),
+            ]
         )
     ]
 )
