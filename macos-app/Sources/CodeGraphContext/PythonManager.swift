@@ -314,7 +314,7 @@ final class PythonManager: ObservableObject {
         healthCheckTimer = nil
     }
 
-    private func checkAllHealth() async {
+    func checkAllHealth() async {
         await checkMCPHealth()
         await checkVizHealth()
         await checkFalkorDBHealth()
