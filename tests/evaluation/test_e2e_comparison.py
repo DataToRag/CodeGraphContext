@@ -549,10 +549,12 @@ class TestGraphOnly:
 
         res, ms, chars = _mcp("execute_cypher_query", {
             "cypher_query": (
-                "MATCH (a:File)-[:IMPORTS]->(m1:Module)<-[:CONTAINS]-(b:File), "
-                "(b)-[:IMPORTS]->(m2:Module)<-[:CONTAINS]-(a) "
-                "WHERE a.path < b.path "
-                "RETURN a.path AS file_a, b.path AS file_b LIMIT 10"
+                "MATCH (a:Function)-[:CALLS]->(b:Function) "
+                "WHERE a.path <> b.path "
+                "WITH a.path AS fa, b.path AS fb "
+                "MATCH (c:Function)-[:CALLS]->(d:Function) "
+                "WHERE c.path = fb AND d.path = fa AND c.path < d.path "
+                "RETURN DISTINCT c.path AS file_a, d.path AS file_b LIMIT 10"
             )
         })
         r.tokens_cgc = chars

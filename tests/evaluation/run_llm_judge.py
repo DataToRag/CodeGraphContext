@@ -47,7 +47,13 @@ def _mcp(tool, args, timeout=60):
 
 
 def _mcp_rel(qtype, target):
-    return _mcp("analyze_code_relationships", {"query_type": qtype, "target": target})
+    """Call analyze_code_relationships and unwrap the double-nested results."""
+    raw = _mcp("analyze_code_relationships", {"query_type": qtype, "target": target})
+    # Response is {results: {query_type, target, results: [...], summary}}
+    inner = raw.get("results", {})
+    if isinstance(inner, dict):
+        return inner.get("results", inner)
+    return inner
 
 
 def _truncate(text, max_chars=2000):
@@ -91,14 +97,14 @@ QUESTIONS = [
         "question": "Find all files that import 'flask'",
         "category": "simple",
         "baseline": lambda: _grep("import flask\\|from flask"),
-        "cgc": lambda: json.dumps(_mcp_rel("find_importers", "flask").get("results", []), indent=2),
+        "cgc": lambda: json.dumps(_mcp_rel("find_importers", "flask"), indent=2),
         "ground_truth": "Multiple files import flask — primarily in webapp/ directory. Both import styles should be found.",
     },
     {
         "question": "What classes inherit from BaseSchema?",
         "category": "simple",
         "baseline": lambda: _grep(r"class \w.*BaseSchema"),
-        "cgc": lambda: json.dumps(_mcp_rel("class_hierarchy", "BaseSchema").get("results", []), indent=2),
+        "cgc": lambda: json.dumps(_mcp_rel("class_hierarchy", "BaseSchema"), indent=2),
         "ground_truth": "BaseSchema has many direct subclasses in webapp/schemas/. A complete answer includes both direct and indirect inheritance.",
     },
     {
@@ -139,21 +145,21 @@ QUESTIONS = [
         "question": "Who calls authenticate() and from where?",
         "category": "structural",
         "baseline": lambda: _grep(r"authenticate(", includes=["*.py"]),
-        "cgc": lambda: json.dumps(_mcp_rel("find_callers", "authenticate").get("results", []), indent=2),
+        "cgc": lambda: json.dumps(_mcp_rel("find_callers", "authenticate"), indent=2),
         "ground_truth": "authenticate() is called from several controller files: access_token.py, change_password.py, change_email.py, confirm_password.py, and unlock_account.py.",
     },
     {
         "question": "Full call chain from authenticate to its callees",
         "category": "structural",
         "baseline": lambda: _grep("def authenticate"),
-        "cgc": lambda: json.dumps(_mcp_rel("find_all_callees", "authenticate").get("results", []), indent=2),
+        "cgc": lambda: json.dumps(_mcp_rel("find_all_callees", "authenticate"), indent=2),
         "ground_truth": "authenticate() calls into user query functions (by_email), password hashing, and account validation. A complete answer traces the full call tree.",
     },
     {
         "question": "If I change UserSchema, what code would be affected?",
         "category": "structural",
         "baseline": lambda: _grep("UserSchema", includes=["*.py"]),
-        "cgc": lambda: json.dumps(_mcp_rel("find_callers", "UserSchema").get("results", []), indent=2),
+        "cgc": lambda: json.dumps(_mcp_rel("find_callers", "UserSchema"), indent=2),
         "ground_truth": "UserSchema is referenced in controllers, services, and tests. A structural answer identifies which functions actually use it, not just text mentions.",
     },
     {
@@ -215,8 +221,8 @@ QUESTIONS = [
         "category": "structural",
         "baseline": lambda: _grep(r"hash_password(", includes=["*.py"]),
         "cgc": lambda: json.dumps({
-            "callers": _mcp_rel("find_callers", "hash_password").get("results", []),
-            "callees": _mcp_rel("find_callees", "hash_password").get("results", []),
+            "callers": _mcp_rel("find_callers", "hash_password"),
+            "callees": _mcp_rel("find_callees", "hash_password"),
         }, indent=2),
         "ground_truth": "hash_password has specific callers (user creation/update code) and calls into hashing libraries. A complete answer shows both directions.",
     },
@@ -234,9 +240,9 @@ QUESTIONS = [
         "category": "graph-only",
         "baseline": lambda: "(grep cannot detect import cycles — requires graph cycle detection)",
         "cgc": lambda: json.dumps(_mcp("execute_cypher_query", {
-            "cypher_query": "MATCH (a:File)-[:IMPORTS]->(m1:Module)<-[:CONTAINS]-(b:File), (b)-[:IMPORTS]->(m2:Module)<-[:CONTAINS]-(a) WHERE a.path < b.path RETURN a.path AS file_a, b.path AS file_b LIMIT 10"
+            "cypher_query": "MATCH (a:Function)-[:CALLS]->(b:Function) WHERE a.path <> b.path WITH a.path AS fa, b.path AS fb MATCH (c:Function)-[:CALLS]->(d:Function) WHERE c.path = fb AND d.path = fa AND c.path < d.path RETURN DISTINCT c.path AS file_a, d.path AS file_b LIMIT 10"
         }).get("results", []), indent=2),
-        "ground_truth": "Circular imports are file pairs where A imports B and B imports A. Requires graph cycle detection.",
+        "ground_truth": "Circular dependencies are file pairs where functions in A call functions in B and vice versa. Requires graph cycle detection.",
     },
     {
         "question": "What is the most coupled module pair?",
@@ -267,7 +273,7 @@ QUESTIONS = [
         "question": "Find code paths between create_app and authenticate",
         "category": "graph-only",
         "baseline": lambda: "(grep cannot trace multi-hop call chains)",
-        "cgc": lambda: json.dumps(_mcp_rel("call_chain", "authenticate").get("results", {}), indent=2),
+        "cgc": lambda: json.dumps(_mcp_rel("call_chain", "authenticate"), indent=2),
         "ground_truth": "A call chain traces the path from one function to another through intermediate CALLS edges.",
     },
     {

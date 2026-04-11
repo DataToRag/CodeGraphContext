@@ -287,7 +287,7 @@ class CodeFinder:
             repo_filter = "AND caller.path STARTS WITH $repo_path" if repo_path else ""
             if path:
                 result = session.run(f"""
-                    MATCH (caller)-[call:CALLS]->(target:Function {{name: $function_name, path: $path}})
+                    MATCH (caller)-[call:CALLS]->(target {{name: $function_name, path: $path}})
                     WHERE (caller:Function OR caller:Class OR caller:File) {repo_filter}
                     OPTIONAL MATCH (caller_file:File)-[:CONTAINS]->(caller)
                     RETURN DISTINCT
@@ -303,11 +303,11 @@ class CodeFinder:
                 ORDER BY caller_is_dependency ASC, caller_file_path, caller_line_number
                     LIMIT 20
                 """, function_name=function_name, path=path, repo_path=repo_path)
-                
+
                 results = result.data()
                 if not results:
                     result = session.run(f"""
-                        MATCH (caller)-[call:CALLS]->(target:Function {{name: $function_name}})
+                        MATCH (caller)-[call:CALLS]->(target {{name: $function_name}})
                         WHERE (caller:Function OR caller:Class OR caller:File) {repo_filter}
                         OPTIONAL MATCH (caller_file:File)-[:CONTAINS]->(caller)
                         RETURN DISTINCT
@@ -326,7 +326,7 @@ class CodeFinder:
                     results = result.data()
             else:
                 result = session.run(f"""
-                    MATCH (caller:Function)-[call:CALLS]->(target:Function {{name: $function_name}})
+                    MATCH (caller:Function)-[call:CALLS]->(target {{name: $function_name}})
                     WHERE 1=1 {repo_filter}
                     OPTIONAL MATCH (caller_file:File)-[:CONTAINS]->(caller)
                     RETURN DISTINCT
@@ -354,7 +354,7 @@ class CodeFinder:
                 absolute_file_path = str(Path(path).resolve())
                 result = session.run(f"""
                     MATCH (caller:Function {{name: $function_name, path: $absolute_file_path}})
-                    MATCH (caller)-[call:CALLS]->(called:Function)
+                    MATCH (caller)-[call:CALLS]->(called)
                     WHERE called.path STARTS WITH $repo_path OR $repo_path IS NULL
                     OPTIONAL MATCH (called_file:File)-[:CONTAINS]->(called)
                     RETURN DISTINCT
@@ -371,7 +371,7 @@ class CodeFinder:
                 """, function_name=function_name, absolute_file_path=absolute_file_path, repo_path=repo_path)
             else:
                 result = session.run(f"""
-                    MATCH (caller:Function {{name: $function_name}})-[call:CALLS]->(called:Function)
+                    MATCH (caller:Function {{name: $function_name}})-[call:CALLS]->(called)
                     WHERE called.path STARTS WITH $repo_path OR $repo_path IS NULL
                     OPTIONAL MATCH (called_file:File)-[:CONTAINS]->(called)
                     RETURN DISTINCT
