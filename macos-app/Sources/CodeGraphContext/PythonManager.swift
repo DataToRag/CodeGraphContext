@@ -17,7 +17,7 @@ final class PythonManager: ObservableObject {
     private var falkorDBProcess: Process?
     private var mcpProcess: Process?
     private var vizProcess: Process?
-    private var healthCheckTimer: Timer?
+    private var initialHealthCheckDone = false
     private var mcpRestartCount = 0
     private var vizRestartCount = 0
     private let maxRestarts = 3
@@ -297,21 +297,17 @@ final class PythonManager: ObservableObject {
     // MARK: - Health Checks
 
     private func startHealthChecks() {
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                await self?.checkAllHealth()
-            }
-        }
-        // Run once after a short delay (let processes start)
+        // Single check after processes have started. Ongoing checks happen
+        // on-demand via refreshOnMenuOpen() in AppState.
         Task {
             try? await Task.sleep(for: .seconds(3))
             await checkAllHealth()
+            initialHealthCheckDone = true
         }
     }
 
     private func stopHealthChecks() {
-        healthCheckTimer?.invalidate()
-        healthCheckTimer = nil
+        // No timer to invalidate — health checks are on-demand only
     }
 
     func checkAllHealth() async {
