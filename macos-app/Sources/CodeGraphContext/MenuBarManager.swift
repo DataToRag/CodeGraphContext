@@ -24,7 +24,11 @@ struct MenuBarView: View {
     }
 
     var body: some View {
-        Color.clear.frame(height: 0).onAppear { appState.refreshOnMenuOpen() }
+        // Refresh immediately on open + every 10s while menu is visible
+        TimelineView(.periodic(from: .now, by: 10)) { _ in
+            Color.clear.frame(height: 0)
+                .onAppear { appState.refreshOnMenuOpen() }
+        }
 
         Button("Setup Guide...") {
             activateApp()
