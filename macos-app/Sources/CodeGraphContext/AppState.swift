@@ -10,17 +10,17 @@ final class AppState: ObservableObject {
     var vizPort: Int { pythonManager.vizPort }
 
     private var cancellables = Set<AnyCancellable>()
-    private var refreshTimer: Timer?
 
     init() {
-        // Forward child ObservableObject changes so SwiftUI views update
+        // Forward child ObservableObject changes so SwiftUI views update.
+        // Throttle to max 1 update per second to avoid runaway re-renders.
         pythonManager.objectWillChange
-            .receive(on: RunLoop.main)
+            .throttle(for: .seconds(1), scheduler: RunLoop.main, latest: true)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
         indexingManager.objectWillChange
-            .receive(on: RunLoop.main)
+            .throttle(for: .seconds(1), scheduler: RunLoop.main, latest: true)
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
@@ -33,42 +33,27 @@ final class AppState: ObservableObject {
 
     func start() {
         pythonManager.startAll()
-        startPeriodicRefresh()
+
+        // Single initial data fetch after services have started
+        Task {
+            try? await Task.sleep(for: .seconds(8))
+            await indexingManager.refreshAll()
+        }
     }
 
     func stop() {
-        stopPeriodicRefresh()
         Task { await indexingManager.unwatchAll() }
         pythonManager.stopAll()
     }
 
-    // MARK: - Periodic Data Refresh
-
-    private func startPeriodicRefresh() {
-        // Refresh every 10 seconds — calls are cheap HTTP GETs and fail silently
-        // when MCP isn't ready yet
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                await self.indexingManager.refreshAll()
-                if self.indexingManager.isIndexing {
-                    await self.indexingManager.pollJobProgress()
-                }
-            }
-        }
-        // Initial fetch — retry a few times in case MCP is still starting
+    /// Called when user opens the menu — refresh data on demand
+    func refreshOnMenuOpen() {
         Task {
-            for delay in [5, 10, 20] {
-                try? await Task.sleep(for: .seconds(delay))
-                await indexingManager.refreshAll()
-                if !indexingManager.indexedRepositories.isEmpty { break }
+            await indexingManager.refreshAll()
+            if indexingManager.isIndexing {
+                await indexingManager.pollJobProgress()
             }
         }
-    }
-
-    private func stopPeriodicRefresh() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
     }
 }
 

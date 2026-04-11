@@ -15,6 +15,9 @@ struct MenuBarView: View {
     }
 
     var body: some View {
+        // Refresh data each time the menu opens (body is re-evaluated on open)
+        Color.clear.frame(height: 0).onAppear { appState.refreshOnMenuOpen() }
+
         // ── Section 1: Setup ──
         Button("Setup Guide...") {
             NSApp.setActivationPolicy(.regular)

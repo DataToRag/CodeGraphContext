@@ -297,13 +297,16 @@ final class PythonManager: ObservableObject {
     // MARK: - Health Checks
 
     private func startHealthChecks() {
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 await self?.checkAllHealth()
             }
         }
-        // Run immediately on start
-        Task { await checkAllHealth() }
+        // Run once after a short delay (let processes start)
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            await checkAllHealth()
+        }
     }
 
     private func stopHealthChecks() {
