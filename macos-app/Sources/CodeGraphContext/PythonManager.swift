@@ -176,16 +176,14 @@ final class PythonManager: ObservableObject {
         process.standardOutput = pipe
         process.standardError = errPipe
 
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
-            self?.logger.info("MCP stdout: \(line)")
+            if data.isEmpty { handle.readabilityHandler = nil; return }
         }
 
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
-            self?.logger.error("MCP stderr: \(line)")
+            if data.isEmpty { handle.readabilityHandler = nil; return }
         }
 
         process.terminationHandler = { [weak self] proc in
@@ -248,16 +246,14 @@ final class PythonManager: ObservableObject {
         process.standardOutput = pipe
         process.standardError = errPipe
 
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
-            self?.logger.info("Viz stdout: \(line)")
+            if data.isEmpty { handle.readabilityHandler = nil; return }
         }
 
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else { return }
-            self?.logger.error("Viz stderr: \(line)")
+            if data.isEmpty { handle.readabilityHandler = nil; return }
         }
 
         process.terminationHandler = { [weak self] proc in
