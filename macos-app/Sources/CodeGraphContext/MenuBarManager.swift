@@ -156,7 +156,7 @@ struct MenuBarView: View {
         if appState.isPluginInstalled {
             Text("\u{2705} Claude Code Plugin Installed")
         } else {
-            Button("\u{26A0}\u{FE0F} Plugin Not Installed \u{2014} Install...") {
+            Button("\u{26A0}\u{FE0F} Claude Code Plugin Not Installed \u{2014} Install...") {
                 activateApp()
                 openWindow(id: "setup-guide")
             }
